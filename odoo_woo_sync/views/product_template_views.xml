@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+    <!-- Inherit Product Template Form View -->
+    <record id="product_template_form_view_woo_sync" model="ir.ui.view">
+        <field name="name">product.template.form.woo.sync</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_only_form_view"/>
+        <field name="arch" type="xml">
+            <notebook position="inside">
+                <page string="WooCommerce" name="woocommerce_sync">
+                    <group>
+                        <group string="Synchronization Status and Control">
+                            <field name="woo_sync_enabled" widget="boolean_toggle"/>
+                            <field name="woo_product_id" readonly="1" placeholder="Sync to get ID"/>
+                            <field name="woo_last_sync_date" readonly="1"/>
+                        </group>
+                        <group string="Manual Actions">
+                            <button name="sync_to_woocommerce"
+                                    string="Sync This Product Now"
+                                    type="object"
+                                    class="oe_highlight"
+                                    icon="fa-cloud-upload"
+                                    invisible="woo_sync_enabled == False"
+                                    help="Manually push THIS product and its variations to WooCommerce based on current settings."/>
+                        </group>
+                    </group>
+                    <group string="Last Sync Error Log (Template/General)" invisible="woo_sync_error == False">
+                        <field name="woo_sync_error" readonly="1" nolabel="1"/>
+                    </group>
+                    <separator string="Variant WooCommerce Status" invisible="product_variant_count == 1"/>
+                    <field name="product_variant_ids"
+                           mode="tree"
+                           invisible="product_variant_count == 1"
+                           nolabel="1"
+                           context="{'show_attribute_value_ids': True}">
+                        <tree string="Variants WooCommerce Status" decoration-danger="woo_sync_error != False">
+                            <field name="display_name" readonly="1" string="Variant Name"/>
+                            <field name="default_code" string="SKU"/>
+                            <field name="woo_variation_id" readonly="1"/>
+                            <field name="qty_available" string="Stock"/>
+                            <field name="lst_price" string="Price"/>
+                            <field name="woo_last_sync_date" readonly="1" optional="show"/>
+                            <field name="woo_sync_error" readonly="1" optional="show"/>
+                        </tree>
+                    </field>
+                </page>
+            </notebook>
+            <xpath expr="//field[@name='name']" position="after">
+                <label for="default_code" string="SKU" class="oe_inline" invisible="product_variant_count != 1"/>
+                <field name="default_code" placeholder="SKU" class="oe_inline" invisible="product_variant_count != 1"/>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Inherit Product Template Tree View -->
+    <record id="product_template_tree_view_woo_sync" model="ir.ui.view">
+        <field name="name">product.template.tree.woo.sync</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_tree_view"/>
+        <field name="arch" type="xml">
+            <field name="name" position="after">
+                <field name="woo_sync_enabled" optional="show" widget="boolean_toggle"/>
+                <field name="woo_product_id" optional="show" string="Woo ID"/>
+                <field name="woo_last_sync_date" optional="show"/>
+                <field name="woo_sync_error" optional="hide" decoration-danger="woo_sync_error != False"/>
+            </field>
+            <field name="barcode" position="before">
+                <field name="default_code" string="SKU" optional="show"/>
+            </field>
+        </field>
+    </record>
+
+    <!-- Inherit Product Template Kanban View -->
+    <record id="product_template_kanban_view_woo_sync" model="ir.ui.view">
+        <field name="name">product.template.kanban.woo.sync</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_kanban_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//div[hasclass('oe_kanban_details')]" position="inside">
+                <div class="mt-1" title="WooCommerce Sync Status">
+                    <field name="woo_sync_enabled" widget="boolean_toggle" nolabel="1"/>
+                    <small class="ml-1">Sync</small>
+                    <field name="woo_product_id" readonly="1" class="ml-2" placeholder="No Woo ID"/>
+                    <i class="fa fa-exclamation-triangle text-danger ml-1" title="Sync Error" invisible="woo_sync_error == False"/>
+                    <field name="woo_sync_error" invisible="1"/>
+                </div>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Action to open Product view filtered by sync enabled -->
+    <record id="action_product_template_woo_sync_enabled" model="ir.actions.act_window">
+        <field name="name">WooCommerce Synced Products</field>
+        <field name="res_model">product.template</field>
+        <field name="view_mode">tree,kanban,form</field>
+        <field name="domain">[('woo_sync_enabled', '=', True)]</field>
+        <field name="context">{'search_default_filter_to_sell': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No products are currently marked for WooCommerce synchronization.
+            </p>
+            <p>
+                Enable 'Sync with WooCommerce' on the WooCommerce tab of the product form for the products you want to sync.
+            </p>
+        </field>
+    </record>
+
+    <!-- Menu items moved to odoo_woo_sync_menus.xml -->
+
+    </data>
+</odoo>

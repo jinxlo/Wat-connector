@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+        <!-- Wizard Form View -->
+        <record id="view_woo_sync_wizard_form" model="ir.ui.view">
+            <field name="name">woo.sync.wizard.form</field>
+            <field name="model">woo.sync.wizard</field>
+            <field name="arch" type="xml">
+                <form string="Sync Products to WooCommerce">
+                    <div class="alert alert-warning" role="alert">
+                        <strong>Action Buttons:</strong> Use the buttons below to either <strong>Enable Syncing</strong> based on criteria OR <strong>Perform Actual Sync</strong> for already enabled products.
+                    </div>
+                    <hr/>
+
+                    <!-- Section for Enabling Sync -->
+                    <h4>Enable Syncing</h4>
+                    <p>Use this button to mark products for future synchronization based on criteria.</p>
+                    <button name="button_enable_sync_for_products_with_images"
+                            string="Enable Sync for ALL Products with Images" type="object"
+                            class="btn-secondary mb-2" icon="fa-check-square-o"
+                            help="Finds ALL products (regardless of current status) that have a main image and sets their 'Sync with WooCommerce' checkbox to TRUE."
+                            confirm="This will mark ALL products that currently have an image to be synced. Are you sure?"/>
+                    <hr/>
+
+                    <!-- Section for Performing Sync -->
+                    <h4>Perform Synchronization</h4>
+                    <p>These actions will push data to WooCommerce ONLY for products where 'Sync with WooCommerce' is already enabled.</p>
+                    <group>
+                        <group>
+                            <field name="sync_all_enabled" string="Use 'All Enabled' for Below Sync Actions"/>
+                        </group>
+                    </group>
+                    <group invisible="sync_all_enabled == True">
+                        <field name="product_tmpl_ids"
+                               widget="many2many_tags"
+                               placeholder="Select specific enabled products to sync..."
+                               required="sync_all_enabled == False"
+                               options="{'no_create': True, 'no_open': False}"/>
+                    </group>
+                    <footer>
+                        <button name="action_confirm_sync" string="Sync Selected / All Enabled" type="object" class="btn-primary" data-hotkey="q"
+                                help="Syncs selected enabled products (if any) OR all currently enabled products if 'Use All Enabled...' is checked."/>
+                        <button name="action_confirm_sync_with_images" string="Sync Enabled with Images Only" type="object" class="btn-secondary" data-hotkey="w"
+                                help="Syncs selected enabled products (if any) OR all currently enabled products if 'Use All Enabled...' is checked, BUT ONLY includes those which also have a main image."/>
+                        <button string="Cancel" class="btn-secondary" special="cancel" data-hotkey="z"/>
+                    </footer>
+                </form>
+            </field>
+        </record>
+
+        <!-- Action to open wizard from product.template -->
+        <record id="action_woo_sync_wizard_template_binding" model="ir.actions.act_window">
+            <field name="name">Woo Sync Wizard</field>
+            <field name="res_model">woo.sync.wizard</field>
+            <field name="view_mode">form</field>
+            <field name="view_id" ref="view_woo_sync_wizard_form"/>
+            <field name="target">new</field>
+            <field name="binding_model_id" ref="product.model_product_template"/>
+            <field name="binding_view_types">list,form</field>
+        </record>
+
+        <!-- Action to open wizard from product.product -->
+        <record id="action_woo_sync_wizard_variant_binding" model="ir.actions.act_window">
+            <field name="name">Woo Sync Wizard</field>
+            <field name="res_model">woo.sync.wizard</field>
+            <field name="view_mode">form</field>
+            <field name="view_id" ref="view_woo_sync_wizard_form"/>
+            <field name="target">new</field>
+            <field name="binding_model_id" ref="product.model_product_product"/>
+            <field name="binding_view_types">list,form</field>
+        </record>
+
+    </data>
+</odoo>

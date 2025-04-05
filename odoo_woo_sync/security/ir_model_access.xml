@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Removed noupdate="1" from data tag for testing -->
+    <data>
+        <record id="access_woo_sync_wizard" model="ir.model.access">
+            <field name="name">woo.sync.wizard access</field>
+            <field name="model_id" ref="model_woo_sync_wizard"/>
+            <field name="group_id" ref="base.group_user"/>
+            <field name="perm_read">1</field>
+            <field name="perm_write">1</field>
+            <field name="perm_create">1</field>
+            <field name="perm_unlink">1</field>
+        </record>
+    </data>
+</odoo>

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+        <!-- Inherit Product Variant Form View -->
+        <record id="product_product_form_view_woo_sync" model="ir.ui.view">
+            <field name="name">product.product.form.woo.sync</field>
+            <field name="model">product.product</field>
+            <field name="inherit_id" ref="product.product_normal_form_view"/>
+            <field name="arch" type="xml">
+                <notebook position="inside">
+                    <page string="WooCommerce" name="woocommerce_sync_variant"
+                          invisible="product_tmpl_id.product_variant_count == 1">
+                        <group>
+                            <group string="Synchronization Status">
+                                <field name="product_tmpl_id" invisible="1"/>
+                                <field name="woo_sync_enabled" readonly="1"/>
+                                <field name="woo_variation_id" readonly="1"/>
+                                <field name="woo_last_sync_date" readonly="1"/>
+                            </group>
+                            <group string="Actions">
+                                <button name="action_sync_variant_parent_to_woocommerce"
+                                        string="Sync Parent Product Now"
+                                        type="object"
+                                        icon="fa-cloud-upload"
+                                        help="Manually sync the parent product template and ALL its variations to WooCommerce."
+                                        invisible="woo_sync_enabled == False"/>
+                            </group>
+                        </group>
+                        <group string="Last Sync Error Log (Variation Specific)" invisible="woo_sync_error == False">
+                            <field name="woo_sync_error" readonly="1" nolabel="1"/>
+                        </group>
+                        <div class="text-muted mt-2">
+                            Note: Synchronization settings (like which fields to sync) are managed at the main Product Template level ('<field name="product_tmpl_id" readonly="1" nolabel="1"/>').
+                        </div>
+                    </page>
+                </notebook>
+            </field>
+        </record>
+
+    </data>
+</odoo>

@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="utf-8"?> 
+<odoo>
+    <data>
+        <record id="res_config_settings_view_form_woo_sync" model="ir.ui.view">
+            <field name="name">res.config.settings.view.form.inherit.woo.sync</field>
+            <field name="model">res.config.settings</field>
+            <field name="priority" eval="90"/>
+            <field name="inherit_id" ref="base.res_config_settings_view_form"/>
+            <field name="arch" type="xml">
+                <xpath expr="//app[@name='general_settings']" position="inside">
+                    <div class="app_settings_block" data-string="WooCommerce Sync" string="WooCommerce Sync" data-key="odoo_woo_sync" id="woo_sync_main_block">
+                        <h2 id="woo_sync_header">WooCommerce Synchronization</h2>
+                        <div class="row mt16 o_settings_container" id="woo_sync_settings_main">
+
+                            <!-- Activation Block -->
+                            <div class="col-12 col-lg-6 o_setting_box" id="woo_activation">
+                                <div class="o_setting_left_pane">
+                                    <field name="woo_sync_active"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="woo_sync_active" string="Activate Sync"/>
+                                    <div class="text-muted">
+                                        Globally enable or disable the WooCommerce synchronization features.
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- API Credentials Block -->
+                            <div class="col-12 col-lg-6 o_setting_box" id="woo_api_credentials" invisible="woo_sync_active == False">
+                                <div class="o_setting_left_pane"/>
+                                <div class="o_setting_right_pane">
+                                    <span class="o_form_label">API Credentials</span>
+                                    <div class="text-muted">
+                                        Enter your WooCommerce REST API details. Ensure keys have Read/Write permissions.
+                                    </div>
+                                    <div class="content-group mt16">
+                                        <div class="row mt8">
+                                            <label for="woo_url" string="Store URL" class="col-lg-3 o_light_label"/>
+                                            <field name="woo_url" placeholder="https://yourstore.com" required="woo_sync_active == True"/>
+                                        </div>
+                                        <div class="row mt8">
+                                            <label for="woo_consumer_key" string="Consumer Key" class="col-lg-3 o_light_label"/>
+                                            <field name="woo_consumer_key" required="woo_sync_active == True"/>
+                                        </div>
+                                        <div class="row mt8">
+                                            <label for="woo_consumer_secret" string="Consumer Secret" class="col-lg-3 o_light_label"/>
+                                            <field name="woo_consumer_secret" widget="password" required="woo_sync_active == True"/>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- WordPress Credentials Block -->
+                            <div class="col-12 col-lg-6 o_setting_box" id="wp_credentials" invisible="woo_sync_active == False">
+                                <div class="o_setting_left_pane"/>
+                                <div class="o_setting_right_pane">
+                                    <span class="o_form_label">WordPress Credentials (for Image Upload)</span>
+                                    <div class="text-muted">
+                                        Required if 'Sync Main Image' is enabled. Use WP Admin User and generated Application Password.
+                                    </div>
+                                    <div class="content-group mt16">
+                                        <div class="row mt8">
+                                            <label for="wp_admin_username" string="WP Admin Username" class="col-lg-3 o_light_label"/>
+                                            <field name="wp_admin_username" placeholder="wp_admin_user"/>
+                                        </div>
+                                        <div class="row mt8">
+                                            <label for="wp_app_password" string="WP Application Password" class="col-lg-3 o_light_label"/>
+                                            <field name="wp_app_password" widget="password" placeholder="xxxx xxxx ..."/>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Sync Options Block -->
+                            <div class="col-12 col-lg-6 o_setting_box" id="woo_sync_options" invisible="woo_sync_active == False">
+                                <div class="o_setting_left_pane"/>
+                                <div class="o_setting_right_pane">
+                                    <span class="o_form_label">Sync Options</span>
+                                    <div class="text-muted">
+                                        Select which product fields to synchronize from Odoo to WooCommerce.
+                                    </div>
+                                    <div class="content-group mt16">
+                                        <div class="mt8 d-flex align-items-center">
+                                            <field name="woo_sync_stock" nolabel="1"/>
+                                            <label for="woo_sync_stock" class="mb-0 ml-2"/>
+                                        </div>
+                                        <div class="mt8 d-flex align-items-center">
+                                            <field name="woo_sync_price" nolabel="1"/>
+                                            <label for="woo_sync_price" class="mb-0 ml-2"/>
+                                        </div>
+                                        <div class="mt8 d-flex align-items-center">
+                                            <field name="woo_sync_description" nolabel="1"/>
+                                            <label for="woo_sync_description" class="mb-0 ml-2"/>
+                                        </div>
+                                        <div class="mt8 d-flex align-items-center">
+                                            <field name="woo_sync_image" nolabel="1"/>
+                                            <label for="woo_sync_image" class="mb-0 ml-2"/>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Bulk Sync Wizard Button -->
+                            <div class="col-12 col-lg-6 o_setting_box" id="woo_sync_all_products">
+                                <div class="o_setting_left_pane"/>
+                                <div class="o_setting_right_pane">
+                                    <span class="o_form_label">Bulk Sync Tools</span>
+                                    <div class="text-muted">
+                                        Open the sync wizard to enable sync or push selected products with images.
+                                    </div>
+                                    <div class="content-group mt16">
+                                        <button name="%(action_woo_sync_wizard_template_binding)d"
+                                                string="Open Sync Wizard"
+                                                type="action"
+                                                class="btn btn-secondary"
+                                                icon="fa-magic"/>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Test Connection Button -->
+                            <div class="col-12 col-lg-6 o_setting_box" id="woo_test_connection" invisible="woo_sync_active == False">
+                                <div class="o_setting_left_pane"/>
+                                <div class="o_setting_right_pane">
+                                    <span class="o_form_label">Test Connection</span>
+                                    <div class="text-muted">
+                                        Verify API credentials for both WC API and WP (if image sync enabled). Save changes before testing.
+                                    </div>
+                                    <div class="content-group mt16">
+                                        <button name="button_test_woo_connection"
+                                                string="Test Connection"
+                                                type="object"
+                                                class="oe_highlight"
+                                                icon="fa-plug"/>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Cron Info Block -->
+                            <div class="col-12 col-lg-6 o_setting_box" id="woo_cron_info" invisible="woo_sync_active == False">
+                                <div class="o_setting_left_pane"/>
+                                <div class="o_setting_right_pane">
+                                    <span class="o_form_label">Scheduled Sync</span>
+                                    <div class="text-muted">
+                                        Automatic synchronization runs periodically if the scheduled action is activated.
+                                    </div>
+                                    <div class="content-group mt16">
+                                        <span>The action "WooCommerce: Sync Products" can be activated and its interval configured under:</span>
+                                        <br/>
+                                        <strong>Settings > Technical > Automation > Scheduled Actions</strong>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div> <!-- End settings container -->
+                        <div class="mt16 mb16 border-top"/>
+                    </div> <!-- End app_settings_block -->
+                </xpath>
+            </field>
+        </record>
+    </data>
+</odoo>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <menuitem id="menu_woo_sync_inventory_root"
+              name="WooCommerce Sync"
+              parent="stock.menu_stock_root"
+              sequence="95"
+              groups="sales_team.group_sale_manager"/>
+
+    <menuitem id="menu_woo_sync_config_inventory"
+              name="Configuration"
+              parent="odoo_woo_sync.menu_woo_sync_inventory_root"
+              action="base.action_config_settings"
+              sequence="1"/>
+
+    <menuitem id="menu_woo_sync_products_inventory"
+              name="Synced Products"
+              parent="odoo_woo_sync.menu_woo_sync_inventory_root"
+              action="odoo_woo_sync.action_product_template_woo_sync_enabled"
+              sequence="5"/>
+
+    <menuitem id="menu_woo_sync_wizard_action_inventory"
+              name="Manual Actions Wizard"
+              parent="odoo_woo_sync.menu_woo_sync_inventory_root"
+              action="odoo_woo_sync.action_woo_sync_wizard"
+              sequence="10"/>
+
+</odoo>
