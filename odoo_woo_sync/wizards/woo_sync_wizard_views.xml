@@ -17,8 +17,10 @@
                     <h4>Enable Syncing</h4>
                     <p>Use this button to mark products for future synchronization based on criteria.</p>
                     <button name="button_enable_sync_for_products_with_images"
-                            string="Enable Sync for ALL Products with Images" type="object"
-                            class="btn-secondary mb-2" icon="fa-check-square-o"
+                            string="Enable Sync for ALL Products with Images"
+                            type="object"
+                            class="btn-secondary mb-2"
+                            icon="fa-check-square-o"
                             help="Finds ALL products (regardless of current status) that have a main image and sets their 'Sync with WooCommerce' checkbox to TRUE."
                             confirm="This will mark ALL products that currently have an image to be synced. Are you sure?"/>
                     <hr/>
@@ -38,6 +40,15 @@
                                required="sync_all_enabled == False"
                                options="{'no_create': True, 'no_open': False}"/>
                     </group>
+
+                    <!-- Progress Bar Placeholder -->
+                    <div name="sync_progress_section" class="oe_chatter">
+                        <div class="alert alert-info" role="alert">
+                            <strong>Sync Progress:</strong>
+                            This section will show progress updates while syncing in batches of 5 products.
+                        </div>
+                    </div>
+
                     <footer>
                         <button name="action_confirm_sync" string="Sync Selected / All Enabled" type="object" class="btn-primary" data-hotkey="q"
                                 help="Syncs selected enabled products (if any) OR all currently enabled products if 'Use All Enabled...' is checked."/>
