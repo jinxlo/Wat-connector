@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?> 
+<?xml version="1.0" encoding="utf-8"?>
 <odoo>
     <data>
         <record id="res_config_settings_view_form_woo_sync" model="ir.ui.view">
@@ -7,7 +7,9 @@
             <field name="priority" eval="90"/>
             <field name="inherit_id" ref="base.res_config_settings_view_form"/>
             <field name="arch" type="xml">
+                <!-- Using the XPath from your previously working version -->
                 <xpath expr="//app[@name='general_settings']" position="inside">
+                    <!-- Main container for all WooCommerce settings -->
                     <div class="app_settings_block" data-string="WooCommerce Sync" string="WooCommerce Sync" data-key="odoo_woo_sync" id="woo_sync_main_block">
                         <h2 id="woo_sync_header">WooCommerce Synchronization</h2>
                         <div class="row mt16 o_settings_container" id="woo_sync_settings_main">
@@ -25,7 +27,7 @@
                                 </div>
                             </div>
 
-                            <!-- API Credentials Block -->
+                            <!-- API Credentials Block - Using Old Syntax -->
                             <div class="col-12 col-lg-6 o_setting_box" id="woo_api_credentials" invisible="woo_sync_active == False">
                                 <div class="o_setting_left_pane"/>
                                 <div class="o_setting_right_pane">
@@ -50,10 +52,11 @@
                                 </div>
                             </div>
 
-                            <!-- WordPress Credentials Block -->
+                            <!-- WordPress Credentials Block - Using Old Syntax -->
                             <div class="col-12 col-lg-6 o_setting_box" id="wp_credentials" invisible="woo_sync_active == False">
                                 <div class="o_setting_left_pane"/>
                                 <div class="o_setting_right_pane">
+                                    <!-- Changed Label Back Slightly to match old working code -->
                                     <span class="o_form_label">WordPress Credentials (for Image Upload)</span>
                                     <div class="text-muted">
                                         Required if 'Sync Main Image' is enabled. Use WP Admin User and generated Application Password.
@@ -71,7 +74,7 @@
                                 </div>
                             </div>
 
-                            <!-- Sync Options Block -->
+                            <!-- Sync Options Block - Using Old Syntax -->
                             <div class="col-12 col-lg-6 o_setting_box" id="woo_sync_options" invisible="woo_sync_active == False">
                                 <div class="o_setting_left_pane"/>
                                 <div class="o_setting_right_pane">
@@ -100,16 +103,53 @@
                                 </div>
                             </div>
 
+                            <!-- GPT Enrichment Block - Using Old Syntax -->
+                            <div class="col-12 col-lg-6 o_setting_box" id="woo_gpt_settings" invisible="woo_sync_active == False">
+                                 <div class="o_setting_left_pane">
+                                     <field name="gpt_enrichment_enabled"/>
+                                 </div>
+                                 <div class="o_setting_right_pane">
+                                     <label for="gpt_enrichment_enabled"/>
+                                     <div class="text-muted">
+                                         Enable OpenAI GPT to generate product descriptions and suggest categories/brands during sync.
+                                     </div>
+                                     <!-- Using Old Syntax for inner group -->
+                                     <div class="content-group mt16" invisible="gpt_enrichment_enabled == False">
+                                         <div class="row mt8">
+                                             <label class="col-lg-3 o_light_label" string="OpenAI API Key" for="openai_api_key"/>
+                                             <field name="openai_api_key" password="True" required="gpt_enrichment_enabled == True"/>
+                                         </div>
+                                         <div class="row mt8">
+                                             <label class="col-lg-3 o_light_label" string="GPT Model" for="gpt_model_name"/>
+                                             <field name="gpt_model_name" placeholder="e.g., gpt-3.5-turbo" required="gpt_enrichment_enabled == True"/>
+                                          </div>
+                                          <!-- +++ NEW FIELD ADDED HERE +++ -->
+                                          <div class="row mt8">
+                                             <label class="col-lg-3 o_light_label" string="Override Existing Data" for="woo_gpt_override_fields"/>
+                                             <div class="d-flex align-items-center">
+                                                <field name="woo_gpt_override_fields" nolabel="1"/>
+                                                <span class="ml-2 text-muted">(Allow GPT suggestions to overwrite existing product data)</span>
+                                             </div>
+                                          </div>
+                                          <!-- +++ END OF NEW FIELD +++ -->
+                                          <div class="text-muted mt8">
+                                             Requires a valid OpenAI API Key with access to the specified model. See OpenAI documentation.
+                                          </div>
+                                     </div>
+                                 </div>
+                            </div>
+
                             <!-- Bulk Sync Wizard Button -->
                             <div class="col-12 col-lg-6 o_setting_box" id="woo_sync_all_products">
                                 <div class="o_setting_left_pane"/>
                                 <div class="o_setting_right_pane">
                                     <span class="o_form_label">Bulk Sync Tools</span>
+                                     <!-- Changed Label Back Slightly to match old working code -->
                                     <div class="text-muted">
                                         Open the sync wizard to enable sync or push selected products with images.
                                     </div>
                                     <div class="content-group mt16">
-                                        <button name="%(action_woo_sync_wizard_template_binding)d"
+                                        <button name="%(odoo_woo_sync.action_woo_sync_wizard_template_binding)d"
                                                 string="Open Sync Wizard"
                                                 type="action"
                                                 class="btn btn-secondary"
@@ -118,13 +158,13 @@
                                 </div>
                             </div>
 
-                            <!-- Test Connection Button -->
+                            <!-- Test Connection Button - Using Old Syntax -->
                             <div class="col-12 col-lg-6 o_setting_box" id="woo_test_connection" invisible="woo_sync_active == False">
                                 <div class="o_setting_left_pane"/>
                                 <div class="o_setting_right_pane">
                                     <span class="o_form_label">Test Connection</span>
                                     <div class="text-muted">
-                                        Verify API credentials for both WC API and WP (if image sync enabled). Save changes before testing.
+                                        Verify API credentials for WC API, WP (if image sync enabled), and OpenAI (if GPT enabled).
                                     </div>
                                     <div class="content-group mt16">
                                         <button name="button_test_woo_connection"
@@ -136,7 +176,7 @@
                                 </div>
                             </div>
 
-                            <!-- Cron Info Block -->
+                            <!-- Cron Info Block - Using Old Syntax -->
                             <div class="col-12 col-lg-6 o_setting_box" id="woo_cron_info" invisible="woo_sync_active == False">
                                 <div class="o_setting_left_pane"/>
                                 <div class="o_setting_right_pane">
@@ -153,7 +193,6 @@
                             </div>
 
                         </div> <!-- End settings container -->
-                        <div class="mt16 mb16 border-top"/>
                     </div> <!-- End app_settings_block -->
                 </xpath>
             </field>

@@ -36,7 +36,100 @@ class ProductTemplate(models.Model):
         string="WooCommerce Sync Error", readonly=True, copy=False,
         help="Details of the last synchronization error, if any." )
 
-    # --- API Connection Helpers ---
+    # <<< REMOVED Odoo Brand Field Placeholder >>>
+
+    # <<< --- NEW HELPER: Fetch Live WooCommerce Categories --- >>>
+    def _fetch_live_woo_category_data(self, wcapi):
+        """
+        Fetches all active categories from WooCommerce via API.
+        Handles pagination.
+        Returns:
+            dict: A dictionary mapping category names (lowercase) to their WooCommerce IDs.
+                  Returns None on failure.
+        """
+        if not wcapi: return None
+
+        live_category_data = {}
+        page = 1
+        _logger.info("Fetching live categories from WooCommerce...")
+        while True:
+            try:
+                response = wcapi.get('products/categories', params={'per_page': 100, 'page': page})
+                response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+                current_page_cats = response.json()
+                if not current_page_cats:
+                    break # No more categories on subsequent pages
+
+                for cat in current_page_cats:
+                    cat_id = cat.get('id')
+                    cat_name = cat.get('name')
+                    if cat_id and cat_name:
+                        # Store with lowercase name for case-insensitive lookup later
+                        live_category_data[cat_name.lower()] = cat_id
+
+                # Check if the number of results is less than per_page, indicating the last page
+                if len(current_page_cats) < 100:
+                    break
+
+                page += 1
+                time.sleep(0.1) # Small delay between pages to be nice to the API
+
+            except requests.exceptions.RequestException as e:
+                error_detail = str(e)
+                status_code = "N/A"
+                if e.response is not None:
+                    status_code = e.response.status_code
+                    try: error_detail = e.response.json().get('message', e.response.text)
+                    except Exception: error_detail = e.response.text or str(e)
+                _logger.error(f"Failed to fetch live WooCommerce categories (page {page}). Status: {status_code}, Error: {error_detail}", exc_info=True)
+                return None # Indicate failure
+            except Exception as e:
+                 _logger.error(f"Unexpected error fetching live WooCommerce categories (page {page}): {e}", exc_info=True)
+                 return None # Indicate failure
+
+        _logger.info(f"Successfully fetched {len(live_category_data)} live categories from WooCommerce.")
+        return live_category_data
+    # <<< --- END NEW HELPER --- >>>
+
+
+    # --- MODIFIED: GPT Enrichment Method using Service ---
+    # <<< Now accepts live_category_names list >>>
+    def _get_gpt_enriched_data(self, name, live_category_names=None): # Changed category_list to live_category_names
+        """
+        Calls the AI helper service to get enriched product data from GPT.
+        Passes the list of LIVE WooCommerce category names to constrain GPT.
+        """
+        try:
+            # Ensure the path to your ai_helpers service is correct
+            from odoo.addons.odoo_woo_sync.services import ai_helpers
+        except ImportError:
+            _logger.error("Could not import ai_helpers service. Ensure the module structure and __init__.py files are correct.")
+            return None
+
+        params = self.env['ir.config_parameter'].sudo()
+        gpt_enabled = params.get_param('odoo_woo_sync.gpt_enrichment_enabled', 'False') == 'True'
+        if not gpt_enabled:
+            _logger.debug("GPT enrichment is disabled in settings.")
+            return None
+
+        api_key = params.get_param('odoo_woo_sync.openai_api_key')
+        model = params.get_param('odoo_woo_sync.gpt_model_name', 'gpt-3.5-turbo') # Use configured model
+
+        if not api_key:
+             _logger.warning("OpenAI API Key is missing in settings. Cannot perform GPT enrichment.")
+             return None
+
+        # Pass the live_category_names list fetched from WooCommerce.
+        if live_category_names is None:
+            live_category_names = [] # Ensure it's a list even if fetching failed earlier
+            _logger.warning("No live category names provided to _get_gpt_enriched_data. GPT will not be constrained.")
+
+        _logger.debug(f"Calling GPT enrichment for '{name}' with {len(live_category_names)} live categories using model '{model}'.")
+        # Call the centralized helper function in ai_helpers.py
+        return ai_helpers.call_openai_enrichment(name, live_category_names, api_key, model)
+        # <<< --- END MODIFICATION --- >>>
+
+    # --- API Connection Helpers (Unchanged) ---
     @api.model
     def _get_woo_api_client(self):
         """ Returns an initialized WooCommerce API client (using WC Keys) """
@@ -53,7 +146,10 @@ class ProductTemplate(models.Model):
         try:
             if not woo_url.startswith(('http://', 'https://')): woo_url = 'https://' + woo_url
             wcapi = WOO_API( url=woo_url, consumer_key=key, consumer_secret=secret, wp_api=True, version="wc/v3", timeout=45, query_string_auth=True )
-            wcapi.get("").raise_for_status(); # Test base WC endpoint
+            # Test connection to a reliable WC endpoint
+            _logger.debug(f"Testing WooCommerce API connection to {woo_url}{WC_API_BASE}/data")
+            wcapi.get("data").raise_for_status()
+            _logger.info("WooCommerce API client initialized successfully.")
             return wcapi
         except Exception as e:
             # Extract more specific error details if possible
@@ -88,17 +184,20 @@ class ProductTemplate(models.Model):
         wp_pass = params.get_param('odoo_woo_sync.wp_app_password')
         # ====================================================================
 
-        # Check if WP credentials are provided (needed for media upload)
+        # Check if WP credentials are provided (needed for media upload and now brand taxonomy)
         if not wp_user or not wp_pass:
-            msg = "WP Admin Username or Application Password not configured (required for image uploads)."
-            # Only raise error immediately if triggered manually AND image sync is enabled
+            # Adjusted message as it's now needed for brands too
+            msg = "WP Admin Username or Application Password not configured (required for image uploads and brand sync)."
+            # Only raise error immediately if triggered manually AND image sync OR brand sync is implied
             if self.env.context.get('manual_sync_trigger'):
                  sync_image_enabled = params.get_param('odoo_woo_sync.sync_image', 'False') == 'True'
-                 if sync_image_enabled:
+                 gpt_enabled = params.get_param('odoo_woo_sync.gpt_enrichment_enabled', 'False') == 'True'
+                 # Raise error if image sync is on OR if GPT is on (as GPT provides brands)
+                 if sync_image_enabled or gpt_enabled:
                       _logger.error(f"WP Session Error: {msg}")
                       raise UserError(_(msg))
                  else:
-                     _logger.warning(f"WP Session Skipped: {msg} Image sync is disabled.")
+                     _logger.warning(f"WP Session Skipped: {msg} Image sync and GPT enrichment are disabled.")
                      if not woo_url.startswith(('http://', 'https://')): woo_url = 'https://' + woo_url
                      return None, woo_url # Return None session, but valid URL if needed elsewhere
             else: # Cron job or other context
@@ -137,7 +236,7 @@ class ProductTemplate(models.Model):
             else:
                  error_details = str(e) # Use the exception string if no response
 
-            error_msg = _("Failed to create/validate WP authenticated session using App Password. Status: %s, Details: %s Check WP Username/App Password in Odoo settings and ensure the WP user has permissions.") % (status_code, error_details)
+            error_msg = _("Failed to create/validate WP authenticated session using App Password. Status: %s, Details: %s Check WP Username/App Password in Odoo settings and ensure the WP user has permissions (e.g., edit_posts, upload_files, manage_terms).") % (status_code, error_details)
             _logger.error(error_msg, exc_info=False) # Log details, maybe not full traceback unless debugging
             if self.env.context.get('manual_sync_trigger'): raise UserError(error_msg)
             return None, None
@@ -147,7 +246,7 @@ class ProductTemplate(models.Model):
             if self.env.context.get('manual_sync_trigger'): raise UserError(error_msg)
             return None, None
 
-    # --- _upload_image_to_wp ---
+    # --- _upload_image_to_wp (Unchanged) ---
     def _upload_image_to_wp(self, image_field_name, record_name, record_id):
         """ Uploads an image from an Odoo record to WP Media Library using WP Session"""
         self.ensure_one() # Assumes this method is called on a single record (template or variant)
@@ -157,8 +256,6 @@ class ProductTemplate(models.Model):
         # If called via variant._upload_image_to_wp, 'self' will be the variant record
         if self._name == 'product.product':
             record = self
-            # Note: The template method 'product_template._upload_image_to_wp' is still used
-            # but it operates on data fetched from the 'record' (the variant).
 
         image_data_base64 = getattr(record, image_field_name, None) # Get image from the specific record
         if not image_data_base64:
@@ -171,29 +268,26 @@ class ProductTemplate(models.Model):
         except Exception as e_decode:
             error_msg = f"Failed to decode base64 image data for {record_name} {record_id}: {e_decode}"
             _logger.error(error_msg)
-            # Use sudo() and specific error fields if available (variant uses woo_variation_sync_error)
             error_field = 'woo_variation_sync_error' if record._name == 'product.product' else 'woo_sync_error'
             record.sudo().write({error_field: error_msg})
             return None
 
-        # Get the WP Session (using template's method, assumes template context exists if called from variant)
-        # If called from variant, self.product_tmpl_id._get_wp_requests_session() is implicitly used
-        # Corrected logic: call _get_wp_requests_session on the template model
+        # Get the WP Session
         session, base_url = self.env['product.template']._get_wp_requests_session() # Always get session via template model
 
         if not session:
-             params = self.env['ir.config_parameter'].sudo()
-             sync_image = params.get_param('odoo_woo_sync.sync_image', 'False') == 'True'
-             if sync_image:
-                 error_msg = "Cannot upload image: Failed to get authenticated WP session (check WP credentials in settings)."
-                 error_field = 'woo_variation_sync_error' if record._name == 'product.product' else 'woo_sync_error'
-                 record.sudo().write({error_field: error_msg})
-                 _logger.error(f"{error_msg} for {record_name} {record_id}")
+             # Error logging/handling is now done inside _get_wp_requests_session if needed
+             # We just need to check if the session was returned
+             _logger.warning(f"Cannot upload image for {record_name} {record_id}: Failed to get authenticated WP session.")
+             # Set error on the specific record
+             error_field = 'woo_variation_sync_error' if record._name == 'product.product' else 'woo_sync_error'
+             # Avoid overwriting existing specific WP session errors if already set by _get_wp_requests_session
+             if not record[error_field]:
+                  record.sudo().write({error_field: "Cannot upload image: WP Session failed."})
              return None
 
         media_url = f"{base_url}{WP_API_BASE}/media"
         image_type = 'image/png' # Assuming PNG, adjust if needed based on Odoo image format
-        # Make filename more specific for variants
         variant_suffix = f"_var_{record.id}" if record._name == 'product.product' else f"_tmpl_{record.id}"
         filename = f"odoo_{record_name}{variant_suffix}_image.png" # More specific filename
 
@@ -243,109 +337,283 @@ class ProductTemplate(models.Model):
             record.sudo().write({error_field: error_msg})
             return None
 
-    # --- _prepare_woocommerce_product_data ---
-    def _prepare_woocommerce_product_data(self, wcapi):
-        """ Prepares WC product data, using image ID from WP upload """
+
+    # +++ REPLACED FUNCTION +++
+    # --- MODIFIED: _get_or_create_woo_brand (for Taxonomy-based Brands using 'product_brand' slug) ---
+    def _get_or_create_woo_brand(self, brand_name):
+        """
+        Fetch or create a WooCommerce brand term using the WP REST API for taxonomies.
+        Uses the 'product_brand' taxonomy slug.
+        Requires WP Admin Username & App Password to be configured in settings.
+        """
+        # NOTE: This function now relies on _get_wp_requests_session and no longer needs 'wcapi' passed in.
+
+        # Sanitize brand name
+        brand_name = brand_name.strip()
+        if not brand_name:
+            _logger.warning("Attempted to get/create brand with empty name.")
+            return None
+
+        # --- Confirmed Taxonomy Slug ---
+        brand_taxonomy_slug = 'product_brand' # Set based on your provided URL
+        # --- End Confirmed Slug ---
+
+        # Get the authenticated WP session and base URL
+        # We use the template model's method to ensure consistency
+        session, base_url = self.env['product.template']._get_wp_requests_session()
+
+        if not session or not base_url:
+            _logger.error(f"Cannot get/create brand '{brand_name}': Failed to get authenticated WP session. Check WP Admin Username/App Password in settings.")
+            # Set error on the product template record that called this?
+            # This function doesn't know which template called it directly.
+            # The error will be logged, and the calling function (_prepare...) will log the failure to assign.
+            return None
+
+        # Use the WP v2 API endpoint for the specific taxonomy
+        # Ensure WP_API_BASE constant is defined correctly (e.g., "/wp-json/wp/v2")
+        term_endpoint = f"{base_url}{WP_API_BASE}/{brand_taxonomy_slug}"
+
+        try:
+            # 1. Try to fetch brand term by name using the WP API search
+            _logger.debug(f"Searching for WP taxonomy term '{brand_name}' in taxonomy '{brand_taxonomy_slug}' via endpoint {term_endpoint}...")
+            # WP API uses 'search' parameter for GET requests on taxonomy term endpoints
+            response = session.get(term_endpoint, params={'search': brand_name, 'per_page': 5, 'orderby': 'id'}, timeout=20)
+            response.raise_for_status() # Raise HTTPError for bad responses (e.g., 5xx, 401, 403, but allow 404 initially)
+
+            results = response.json()
+            if results and isinstance(results, list):
+                # Find exact match (case-insensitive) as WP search can be broad
+                for term in results:
+                    if term.get('name', '').lower() == brand_name.lower():
+                        term_id = term.get('id')
+                        _logger.info(f"Found WP brand term '{term['name']}' (ID: {term_id}) in taxonomy '{brand_taxonomy_slug}' via search.")
+                        return term_id # Found it
+
+            # If no exact match found in results list or list was empty
+            _logger.info(f"Brand term '{brand_name}' not found via search in taxonomy '{brand_taxonomy_slug}'. Attempting to create.")
+
+            # 2. If not found, create the brand term using the WP API POST request
+            create_data = {'name': brand_name} # Data payload for creating a term
+            _logger.info(f"Creating WP brand term '{brand_name}' in taxonomy '{brand_taxonomy_slug}' via endpoint {term_endpoint}...")
+            response = session.post(term_endpoint, json=create_data, timeout=30) # Use json= data for POST with requests session
+
+            if response.status_code in [200, 201]: # 201 Created is standard, 200 OK sometimes returned
+                created_term = response.json()
+                term_id = created_term.get('id')
+                if term_id:
+                    _logger.info(f"Successfully created WP brand term '{created_term['name']}' (ID: {term_id}) in taxonomy '{brand_taxonomy_slug}'.")
+                    return term_id
+                else:
+                    _logger.error(f"Failed to create WP brand term '{brand_name}' in taxonomy '{brand_taxonomy_slug}'. API success status {response.status_code} but response missing ID: {response.text}")
+                    return None
+            else:
+                # Log specific creation errors from WP API
+                error_details = response.text
+                try:
+                    # WP API often returns error details in 'message'
+                    error_details = response.json().get('message', response.text)
+                except Exception: pass # Keep raw text if not JSON
+                _logger.error(f"Error creating WP brand term '{brand_name}' in taxonomy '{brand_taxonomy_slug}' (Status: {response.status_code}): {error_details}")
+                # Add hint for common 401/403 errors (permissions)
+                if response.status_code in [401, 403]:
+                     _logger.error(f" --> Hint: Authentication failed. Check WP Admin Username/App Password and ensure the user has 'manage_terms' capability for the '{brand_taxonomy_slug}' taxonomy.")
+                # Check for 'term_exists' code if creating a duplicate (though search should prevent this)
+                elif 'term_exists' in error_details:
+                     _logger.warning(f" --> Hint: Brand term '{brand_name}' might already exist (possible race condition or search mismatch?).")
+                return None
+
+        except requests.exceptions.HTTPError as e:
+             # Handle 404 specifically on the GET search - means taxonomy might not exist or WP API path is wrong
+             if e.response is not None and e.response.status_code == 404:
+                 _logger.error(f"WP API endpoint '{term_endpoint}' for taxonomy '{brand_taxonomy_slug}' returned 404. Cannot search/create brand term '{brand_name}'. Ensure the taxonomy slug is correct and the brand plugin/feature is active.")
+             else: # Log other HTTP errors (5xx, 401, 403 on GET, etc.)
+                 status_code = "N/A"; error_details = str(e)
+                 if e.response is not None:
+                     status_code=e.response.status_code; error_details = e.response.text
+                     try: error_details = e.response.json().get('message', error_details)
+                     except Exception: pass
+                 _logger.error(f"HTTP error during GET/POST for WP brand term '{brand_name}' in taxonomy '{brand_taxonomy_slug}' (Status: {status_code}): {error_details}", exc_info=False)
+
+        except requests.exceptions.RequestException as e_req:
+             # Network errors (DNS, connection refused, timeout during request)
+             _logger.error(f"Network/Request error getting/creating WP brand term '{brand_name}' in taxonomy '{brand_taxonomy_slug}': {e_req}", exc_info=False)
+        except Exception as e:
+            # Any other unexpected errors (JSON decoding, etc.)
+            _logger.error(f"Unexpected error getting/creating WP brand term '{brand_name}' in taxonomy '{brand_taxonomy_slug}': {e}", exc_info=True)
+
+        return None # Return None if any exception occurs or creation fails
+    # +++ END OF REPLACED FUNCTION +++
+
+
+    # +++ MODIFIED FUNCTION +++
+    # --- MODIFIED: _prepare_woocommerce_product_data ---
+    def _prepare_woocommerce_product_data(self, wcapi, enriched_data=None, live_category_data=None):
+        """
+        Prepares WC product data, using image ID from WP upload.
+        Optionally incorporates enriched data for description, category (using live lookup),
+        and brand (using taxonomy lookup).
+        Args:
+            wcapi: Initialized WooCommerce API client (still needed for product create/update).
+            enriched_data (dict): Data returned from GPT (description, category name, brand name).
+            live_category_data (dict): Dictionary mapping live Woo category names (lowercase) to IDs.
+        """
         self.ensure_one()
         params = self.env['ir.config_parameter'].sudo()
         sync_image = params.get_param('odoo_woo_sync.sync_image', 'True') == 'True'
+        # Renamed for clarity & consistency
+        sync_description_setting = params.get_param('odoo_woo_sync.sync_description', 'True') == 'True'
+        sync_price = params.get_param('odoo_woo_sync.sync_price', 'False') == 'True'
+        sync_stock = params.get_param('odoo_woo_sync.sync_stock', 'True') == 'True'
+        # Renamed for clarity & consistency
+        gpt_override_enabled_setting = params.get_param('odoo_woo_sync.gpt_override_fields', 'False') == 'True'
 
         product_sku = self.default_code or f'odoo-tmpl-{self.id}'
-
-        # --- MODIFICATION START: Robust Name Handling ---
-        # Original line:
-        # 'name': self.name or f'Odoo Product {self.id}',
-        # New robust handling:
-        product_name = self.name.strip() if self.name else '' # Strip whitespace if name exists, else empty string
-        final_name = product_name or f'Odoo Product {self.id}' # Use stripped name or fallback if empty/falsy
-        # --- MODIFICATION END ---
+        product_name = self.name.strip() if self.name else ''
+        final_name = product_name or f'Odoo Product {self.id}'
 
         vals = {
-            'name': final_name, # Use the robustly determined name
+            'name': final_name,
             'sku': product_sku,
             'type': 'variable' if self.product_variant_count > 1 else 'simple',
-            'status': 'publish' # Or 'draft'/'pending' if needed
+            'status': 'publish',
+            'categories': [], # Initialize categories list
+            'attributes': [], # Initialize attributes list (brands will NOT go here)
+            # --- CORRECTED: Initialize brand taxonomy key ---
+            'product_brand': [], # Use the correct slug 'product_brand'
+            # --- END CORRECTED ---
         }
 
-        if params.get_param('odoo_woo_sync.sync_description', 'True') == 'True':
+        # --- Description Handling ---
+        # Set default description first (if sync is enabled)
+        if sync_description_setting:
             vals['description'] = self.description_sale or self.description or ''
-            # Consider short description too if needed:
-            # vals['short_description'] = self.description_picking or ''
+            _logger.debug(f"[{final_name}] Default description sync enabled. Initial description set (or empty).")
+        else:
+            _logger.debug(f"[{final_name}] Default description sync disabled.")
 
-        if params.get_param('odoo_woo_sync.sync_price', 'False') == 'True':
-             # For simple products, price comes from template. For variable, it comes from variants.
+        # --- Price/Stock/Image Handling ---
+        if sync_price:
              if vals['type'] == 'simple':
                  vals['regular_price'] = str(self.list_price)
-            # Consider sale price:
-            # if self.sale_price_field: vals['sale_price'] = str(self.sale_price_field)
-
-        # Stock for Simple Products (Template level) - Use the single variant's stock
-        if vals['type'] == 'simple' and params.get_param('odoo_woo_sync.sync_stock', 'True') == 'True':
-            simple_variant = self.product_variant_id # The single variant for a simple product template
-            if simple_variant: # Ensure the variant exists
+        if vals['type'] == 'simple' and sync_stock:
+            simple_variant = self.product_variant_id
+            if simple_variant:
                 vals['manage_stock'] = True
                 stock_qty = int(simple_variant.qty_available)
                 vals['stock_quantity'] = stock_qty
                 vals['stock_status'] = 'instock' if stock_qty > 0 else 'outofstock'
-                # vals['backorders'] = 'no' / 'notify' / 'yes' # Optional
             else:
                  _logger.warning(f"Cannot sync stock for simple product '{self.name}' (ID:{self.id}) as its single variant could not be found.")
-                 vals['manage_stock'] = False # Cannot manage stock without variant reference
-
-
-        # Image Sync for Template (uses WP Media upload)
+                 vals['manage_stock'] = False
         if sync_image:
-            # Clear previous image-related error before attempting upload again
+            # Clear previous image errors before attempting upload
             if self.woo_sync_error and any(term in self.woo_sync_error for term in ['image', 'WP', 'Media']):
                 self.sudo().write({'woo_sync_error': False})
-
-            # Call the _upload_image_to_wp method, passing template details
-            media_id = self._upload_image_to_wp('image_1920', 'product_template', self.id) # Use main image field
+            media_id = self._upload_image_to_wp('image_1920', 'product_template', self.id)
             if media_id:
                 vals['images'] = [{'id': media_id, 'position': 0}]
-            else:
-                vals['images'] = [] # Send empty list if upload failed or no image
-                # Error is logged/set on the template by _upload_image_to_wp
+            # else: # If upload fails or no image, don't send 'images' key
+            #    pass
 
-        # Attributes for Variable Products
-        variation_attribute_names = [] # Keep track of attributes used for variations
+        # --- Attribute Handling (excluding brand) ---
+        variation_attribute_names = []
         if vals['type'] == 'variable':
             attributes_data = []
             for line in self.attribute_line_ids:
+                # Optional: Add check if you also store brand as an Odoo attribute internally
+                # if line.attribute_id.name.lower() == 'brand': continue
+
                 attr_options = line.value_ids.mapped('name')
                 if attr_options:
-                    # Determine if this attribute is for variation based on Odoo config or a flag
-                    # Assuming all attributes on a variable product template are intended for variation for now
-                    is_for_variation = True # Default assumption, adjust if Odoo has a specific field like `create_variant='always'` etc.
+                    # Mark as variation attribute (assuming all Odoo attributes are for variations)
+                    # You might need more specific logic if some are just informational
+                    is_for_variation = True
                     attributes_data.append({
-                        'name': line.attribute_id.name,        # Use attribute's technical/internal name if it differs
+                        'name': line.attribute_id.name,
                         'options': attr_options,
-                        'visible': True,                       # Visible on product page
-                        'variation': is_for_variation          # Used for variations?
+                        'visible': True, # Generally true for variation attributes
+                        'variation': is_for_variation
                     })
                     if is_for_variation:
-                         variation_attribute_names.append(line.attribute_id.name) # Store the name used in Woo
+                         variation_attribute_names.append(line.attribute_id.name)
 
-            # Sanity check: Variable products should ideally have attributes marked for variation
-            if not any(attr['variation'] for attr in attributes_data) and self.product_variant_ids:
-                 _logger.warning(f"Variable product '{self.name}' (ID:{self.id}) has attributes defined, but none were marked for 'variation: true' in the WooCommerce payload. This might prevent variations from working correctly in Woo.")
-                 # Consider forcing the first attribute or handling this based on specific business logic
-                 # If attributes_data is not empty, maybe mark the first one?
-                 # if attributes_data:
-                 #    attributes_data[0]['variation'] = True
-                 #    variation_attribute_names.append(attributes_data[0]['name'])
-                 #    _logger.warning(f" --> Forcing first attribute '{attributes_data[0]['name']}' to be used for variations.")
+            # Only assign attributes if there are any non-brand ones
+            if attributes_data:
+                vals['attributes'] = attributes_data
+            # else: # If no attributes, don't send 'attributes' key
+            #    vals.pop('attributes', None) # Already handled by cleanup at end
 
-            vals['attributes'] = attributes_data
 
-        # Other potential fields: categories, tags, weight, dimensions, etc.
-        # Example:
-        # if self.categ_id: vals['categories'] = [{'id': woo_category_id_mapped_from_odoo}]
-        # if self.weight: vals['weight'] = str(self.weight)
+        # --- Process Enriched Data ---
+        if enriched_data:
+            # --- Apply GPT Description (WITH LOGGING) ---
+            gpt_desc = enriched_data.get('description')
+            # Debug logging for override condition
+            _logger.debug(f"[{final_name}] Checking GPT description override condition:")
+            _logger.debug(f"  - gpt_override_enabled_setting: {gpt_override_enabled_setting} (Type: {type(gpt_override_enabled_setting)})")
+            _logger.debug(f"  - sync_description_setting: {sync_description_setting} (Type: {type(sync_description_setting)})")
+            _logger.debug(f"  - gpt_desc: '{gpt_desc}' (Type: {type(gpt_desc)}, Is Truthy: {bool(gpt_desc)})")
+            if gpt_override_enabled_setting and sync_description_setting and gpt_desc:
+                 _logger.info(f"[{final_name}] Applying GPT-enriched description (Override Enabled).")
+                 vals['description'] = gpt_desc # Overwrite default description
+            else:
+                 _logger.info(f"[{final_name}] Condition for applying GPT description not met. Keeping default description (if any).")
+
+            # --- Apply GPT Category (using live lookup) ---
+            gpt_cat_name = enriched_data.get("category")
+            if gpt_cat_name and isinstance(gpt_cat_name, str) and gpt_cat_name.strip():
+                clean_cat_name = gpt_cat_name.strip()
+                if live_category_data:
+                    found_woo_cat_id = live_category_data.get(clean_cat_name.lower())
+                    if found_woo_cat_id:
+                        # Assign using the standard 'categories' key
+                        vals['categories'] = [{'id': int(found_woo_cat_id)}]
+                        _logger.info(f"[{final_name}] Mapped GPT category '{clean_cat_name}' to live Woo Category ID {found_woo_cat_id}.")
+                    else:
+                        _logger.warning(f"[{final_name}] GPT-suggested category '{clean_cat_name}' not found in live WooCommerce categories. Cannot set category.")
+                else:
+                    _logger.warning(f"[{final_name}] Cannot map GPT category '{clean_cat_name}' because live category data was not available.")
+            elif gpt_cat_name is not None:
+                 _logger.info(f"[{final_name}] GPT returned category '{gpt_cat_name}', but it's null or empty. Skipping category assignment.")
+
+
+            # --- Apply GPT Brand (MODIFIED for TAXONOMY) ---
+            gpt_brand_name = enriched_data.get('brand')
+            if gpt_brand_name and isinstance(gpt_brand_name, str) and gpt_brand_name.strip() and gpt_brand_name.strip().lower() != 'unknown':
+                clean_brand_name = gpt_brand_name.strip()
+                _logger.info(f"[{final_name}] GPT provided brand '{clean_brand_name}'. Attempting to get/create in Woo Brand Taxonomy.")
+
+                # Call the MODIFIED brand function (which now uses WP API)
+                # No longer pass wcapi
+                brand_term_id = self._get_or_create_woo_brand(clean_brand_name)
+
+                if brand_term_id:
+                    # --- Assign brand using TAXONOMY SLUG 'product_brand' as the key ---
+                    brand_taxonomy_slug = 'product_brand' # Define slug for clarity
+                    vals[brand_taxonomy_slug] = [{'id': brand_term_id}] # Assign list with dict containing id
+                    # --- END ASSIGNMENT ---
+                    _logger.info(f"[{final_name}] Assigned brand '{clean_brand_name}' (Term ID: {brand_term_id}) to Woo Payload using taxonomy key '{brand_taxonomy_slug}'.")
+                else:
+                    # Error already logged in _get_or_create_woo_brand
+                    _logger.warning(f"[{final_name}] Could not get or create brand term '{clean_brand_name}' in WooCommerce Taxonomy. Brand will not be assigned.")
+            elif gpt_brand_name is not None:
+                 _logger.info(f"[{final_name}] GPT returned brand '{gpt_brand_name}', but it's null, empty, or 'unknown'. Skipping brand assignment.")
+            # --- END Apply GPT Brand ---
+        else:
+            _logger.debug(f"[{final_name}] No enriched_data provided to _prepare_woocommerce_product_data.")
+
+        # --- Clean up empty list keys before returning ---
+        # Remove keys if their corresponding list value is empty, as WC API prefers this
+        if not vals.get('categories'): vals.pop('categories', None)
+        if not vals.get('product_brand'): vals.pop('product_brand', None) # Use correct slug
+        if not vals.get('attributes'): vals.pop('attributes', None)
+        if not vals.get('images'): vals.pop('images', None)
 
         return vals, variation_attribute_names
+    # +++ END OF MODIFIED FUNCTION +++
 
-    # --- _find_existing_woo_product ---
+
+    # --- _find_existing_woo_product (Unchanged) ---
     def _find_existing_woo_product(self, wcapi):
         """ Finds existing Woo product by ID or SKU """
         self.ensure_one()
@@ -364,7 +632,6 @@ class ProductTemplate(models.Model):
                     _logger.warning(f"Stored WooCommerce ID {self.woo_product_id} for {product_display} not found (404). Clearing stored ID.")
                     self.sudo().write({'woo_product_id': False}) # Clear invalid ID
                 else:
-                    # Log other errors but don't clear ID immediately, might be temporary API issue
                      _logger.error(f"Error checking Woo ID {self.woo_product_id} (Status: {response.status_code}): {response.text}")
             except Exception as e_get:
                 _logger.error(f"Exception occurred while checking Woo ID {self.woo_product_id}: {e_get}", exc_info=False)
@@ -377,18 +644,15 @@ class ProductTemplate(models.Model):
                 response.raise_for_status() # Check for HTTP errors
                 results = response.json()
                 if results and isinstance(results, list):
-                    # Found one or more products with this SKU
                     found_product = results[0] # Assume first result is the one
                     existing_woo_id = str(found_product['id'])
                     _logger.info(f"Found existing Woo product by SKU '{self.default_code}'. Woo ID: {existing_woo_id} for {product_display}")
-                    # Update Odoo record with the found ID if it wasn't stored or was cleared
                     if not self.woo_product_id or self.woo_product_id != existing_woo_id:
                         self.sudo().write({'woo_product_id': existing_woo_id})
                 else:
                      _logger.debug(f"No Woo product found with SKU: '{self.default_code}'")
 
             except requests.exceptions.RequestException as e_sku_req:
-                 # Handle specific request errors (like 404 if SKU not found, though API might return empty list)
                  if e_sku_req.response is not None:
                       _logger.error(f"Error checking Woo SKU '{self.default_code}' (Status: {e_sku_req.response.status_code}): {e_sku_req.response.text}")
                  else:
@@ -398,183 +662,170 @@ class ProductTemplate(models.Model):
 
         return existing_woo_id
 
-    # --- sync_to_woocommerce ---
+    # --- sync_to_woocommerce (Added logging for final payload - DEBUG ONLY) ---
     def sync_to_woocommerce(self):
         """
         Syncs selected Odoo product templates (and variants) to WooCommerce.
-        This method processes the products contained within the 'self' recordset.
-        It's designed to be called either directly or by the batching method.
+        Fetches live categories, calls GPT, prepares payload using live data, and sends to Woo.
         """
-        # If called directly (not via batch method), set manual trigger context
         sync_context = self.env.context.copy()
         if 'manual_sync_trigger' not in sync_context:
-            sync_context['manual_sync_trigger'] = True # Assume manual if context not set
+            sync_context['manual_sync_trigger'] = True # Assume manual unless called by cron with context set
 
-        # Get API client (checks credentials and active status within the method)
-        # Use with_context to pass the manual_sync_trigger status
         wcapi = self.with_context(sync_context)._get_woo_api_client()
         if not wcapi:
-            # Error handling/logging is done within _get_woo_api_client
-            # If called manually, error is raised there. If via cron/batch, it logs and returns None.
             _logger.error("Sync Aborted: Could not get WooCommerce API client.")
-            # Should we raise here? Depends. If called by batch, raising stops the whole batch job.
-            # Let's rely on _get_woo_api_client to raise UserError if manual.
-            return False # Indicate failure to the calling batch method if needed
+            # Error handled/raised in _get_woo_api_client for manual trigger
+            return False # Indicate failure
 
-        # Filter products in the current recordset ('self') that are actually enabled for sync
-        # Note: The batch method *should* have pre-filtered, but double-checking is safe.
         products_to_process = self.filtered('woo_sync_enabled')
         if not products_to_process:
-            # Check context before raising: only show error if manually triggered on records where none are enabled
             if self.env.context.get('manual_sync_trigger') and len(self) > 0:
                  raise UserError(_("None of the products in this batch/selection are enabled for WooCommerce sync."))
             _logger.info("Sync: No products in the current set are enabled for sync.")
-            return True # Nothing to do in this batch/selection
+            return True # No products to sync is considered success
 
-        _logger.info(f"Starting WooCommerce sync for {len(products_to_process)} product template(s) in this batch/selection...")
+        _logger.info(f"Starting WooCommerce sync for {len(products_to_process)} product template(s)...")
+
+        # --- Fetch Live Data ONCE per run (if not passed via context) ---
+        live_category_data = sync_context.get('live_category_data')
+        live_category_names_for_gpt = sync_context.get('live_category_names_for_gpt')
+
+        if live_category_data is None:
+            _logger.info("Fetching live WooCommerce category data for this sync run...")
+            live_category_data = self._fetch_live_woo_category_data(wcapi)
+            if live_category_data is None:
+                _logger.warning("Proceeding with sync, but category enrichment/assignment will likely fail due to inability to fetch live categories.")
+                live_category_data = {} # Use empty dict to avoid errors later
+                live_category_names_for_gpt = []
+            else:
+                live_category_names_for_gpt = list(live_category_data.keys()) # Keys are already lowercase
+        else:
+             _logger.info("Using pre-fetched live category data provided via context.")
+
+        # --- Sync Loop ---
         synced_count = 0
         error_count = 0
         products_with_errors = self.env['product.template']
 
         for template in products_to_process:
-            # Clear previous sync error for this attempt
-            template.sudo().write({'woo_sync_error': False})
+            template.sudo().write({'woo_sync_error': False}) # Clear previous error
             template_display = f"'{template.name}' (ID:{template.id}, SKU:{template.default_code or 'N/A'})"
             _logger.info(f"Processing {template_display}...")
 
             try:
-                # Prepare the data payload for WooCommerce
-                product_data, variation_attribute_names = template._prepare_woocommerce_product_data(wcapi)
+                # --- GPT Enrichment Call ---
+                enriched_data = template._get_gpt_enriched_data(template.name, live_category_names=live_category_names_for_gpt)
 
-                # --- MODIFICATION START: Add Logging for Missing Name ---
-                # Check if the 'name' field is missing or empty BEFORE the API call
+                # --- Prepare Woo Payload Call ---
+                product_data, variation_attribute_names = template._prepare_woocommerce_product_data(
+                    wcapi, # Pass wcapi here, still needed for the main product sync
+                    enriched_data=enriched_data,
+                    live_category_data=live_category_data
+                )
+
+                # --- Basic Payload Validation ---
                 if not product_data.get('name'):
-                    _logger.error(
-                        f"Product '{template.display_name}' (ID: {template.id}) is missing a name "
-                        f"before sending to WooCommerce! Prepared Payload: "
-                        f"{json.dumps(product_data, indent=2)}"
-                    )
-                    # Depending on desired behavior, you might want to:
-                    # 1. Skip this product:
-                    #    error_message = "Cannot sync product: Name is missing or invalid."
-                    #    template.sudo().write({'woo_sync_error': error_message})
-                    #    error_count += 1
-                    #    products_with_errors |= template
-                    #    time.sleep(0.1)
-                    #    continue # Skip to next product
-                    # 2. Raise an error (might stop batch process):
-                    #    raise ValidationError(_("Cannot sync product '%s' (ID: %s) to WooCommerce: Name is missing or invalid.") % (template.display_name, template.id))
-                    # 3. Allow the API call to proceed (current behavior - it will likely fail)
-                    pass # Logged the error, let the API call proceed and fail if name is truly the issue
-                # --- MODIFICATION END ---
+                     _logger.error(f"Product data preparation failed for {template_display}: Missing product name.")
+                     template.sudo().write({'woo_sync_error': "Failed to prepare product data: Name is missing."})
+                     error_count += 1; products_with_errors |= template; time.sleep(0.1); continue
 
-                # Check if image upload failed previously during _prepare_...
-                # The error would have been set on the template by _upload_image_to_wp
-                if template.woo_sync_error and any(term in template.woo_sync_error for term in ['image', 'WP', 'Media']):
-                    _logger.error(f"Skipping API call for {template_display} due to previous image/WP error: {template.woo_sync_error}")
-                    error_count += 1
-                    products_with_errors |= template
-                    time.sleep(0.1) # Small delay
-                    continue # Move to the next product in this batch
+                # Check for blocking WP session errors if image/brand sync failed during prep
+                # Note: _get_wp_requests_session handles raising UserError on manual trigger if creds missing
+                if template.woo_sync_error and "WP Session" in template.woo_sync_error:
+                     _logger.error(f"Skipping API call for {template_display} due to WP session error during preparation: {template.woo_sync_error}")
+                     error_count += 1; products_with_errors |= template; time.sleep(0.1); continue
 
-                # Find if the product exists in Woo
+                # --- Find Existing Product & Determine Action ---
                 existing_woo_id = template._find_existing_woo_product(wcapi)
                 action = 'update' if existing_woo_id else 'create'
                 start_time = time.time()
 
-                # Perform the Create or Update API call
+                # --- Make API Call ---
+                # >>> DEBUG LOGGING: Uncomment the line below to see the EXACT payload sent <<<
+                # _logger.debug(f"{action.capitalize()} Payload for {template_display}: {json.dumps(product_data, indent=2)}")
+                # >>> END DEBUG LOGGING <<<
+
                 if existing_woo_id:
-                    _logger.debug(f"Updating Woo product ID {existing_woo_id} with data: {json.dumps(product_data, indent=2)}") # Log payload
+                    _logger.debug(f"Updating Woo product ID {existing_woo_id} for {template_display}. Payload keys: {list(product_data.keys())}")
                     response = wcapi.put(f"products/{existing_woo_id}", product_data)
                 else:
-                    _logger.debug(f"Creating new Woo product with data: {json.dumps(product_data, indent=2)}") # Log payload
+                    _logger.debug(f"Creating new Woo product for {template_display}. Payload keys: {list(product_data.keys())}")
                     response = wcapi.post("products", product_data)
 
                 end_time = time.time()
                 _logger.debug(f"WooCommerce API '{action}' call for {template_display} took {end_time - start_time:.2f}s. Status: {response.status_code if response else 'N/A'}")
 
-                # Process the response
-                if response and response.status_code in [200, 201]: # OK or Created
+                # --- Process API Response ---
+                if response and response.status_code in [200, 201]:
                     woo_product = response.json()
                     retrieved_woo_id = str(woo_product.get('id'))
+                    if not retrieved_woo_id:
+                         _logger.error(f"WooCommerce API success status ({response.status_code}) but no product ID returned for {template_display}. Response: {woo_product}")
+                         template.sudo().write({'woo_sync_error': f"Sync successful (Status {response.status_code}) but no Woo ID returned."})
+                         error_count += 1; products_with_errors |= template; continue # Treat as error
+
                     _logger.info(f"Successfully {action}d product in WooCommerce. Woo ID: {retrieved_woo_id} for {template_display}")
 
-                    vals_to_write = {
-                        'woo_last_sync_date': fields.Datetime.now(),
-                        'woo_sync_error': False # Explicitly clear error on success
-                    }
-                    # Update Woo ID if it was created or changed
+                    vals_to_write = { 'woo_last_sync_date': fields.Datetime.now(), 'woo_sync_error': False }
                     if not template.woo_product_id or template.woo_product_id != retrieved_woo_id:
                         vals_to_write['woo_product_id'] = retrieved_woo_id
-
                     template.sudo().write(vals_to_write)
 
-                    # Sync variations if it's a variable product and sync was successful
-                    if product_data['type'] == 'variable' and retrieved_woo_id:
-                         # Pass the confirmed Woo ID and the attributes marked for variation
+                    # --- Sync Variations (if applicable) ---
+                    if product_data.get('type') == 'variable' and retrieved_woo_id: # Check key exists
                          variation_success = template._sync_woocommerce_variations(wcapi, retrieved_woo_id, variation_attribute_names)
-                         # Variation sync errors are handled within that method and set on variants/template
                          if not variation_success:
-                              _logger.warning(f"Variation sync encountered errors for template {template_display} (Woo ID: {retrieved_woo_id}). Template sync considered successful, but check variants.")
-                              # Decide if template should be marked with error if variations failed.
-                              # Currently, only variation method sets errors.
+                              _logger.warning(f"Variation sync encountered errors for template {template_display}. Check variant records for details.")
+                              # Optionally mark template with a general variation error
+                              if not template.woo_sync_error: # Don't overwrite other errors
+                                    template.sudo().write({'woo_sync_error': 'Variation sync completed with errors.'})
+                              # Don't increment error_count here, variation errors are on variants
 
-                    synced_count += 1 # Count template success
-
+                    synced_count += 1
                 else:
                     # Handle API errors
-                    error_details = "Unknown API error"
-                    status_code = "N/A"
+                    error_details = "Unknown API error"; status_code = "N/A"
                     if response is not None:
                         status_code = response.status_code
                         try:
                             error_json = response.json()
-                            # Try to get specific WooCommerce error message
                             error_details = f"Code: {error_json.get('code', 'N/A')}. Message: {error_json.get('message', str(error_json))}"
-                        except Exception:
-                            # Fallback if response is not JSON
-                            error_details = response.text or "No response body"
-                    else:
-                         error_details = "No response received from API." # E.g. timeout before response
+                            # Add hints for common issues
+                            if 'product_invalid_sku' in error_json.get('code', ''):
+                                error_details += f" (Hint: SKU '{product_data.get('sku')}' might already exist in Woo for another product?)"
+                            elif any(err_code in error_json.get('code', '') for err_code in ['product_invalid_attribute', 'product_invalid_term', 'woocommerce_rest_term_invalid']):
+                                error_details += " (Hint: Attribute/Term assignment issue? Check Brand/Category/Attribute slugs and existence in Woo.)"
+                            elif 'taxonomy' in error_json.get('message',''):
+                                 error_details += " (Hint: Problem with category or brand assignment?)"
+                        except Exception: error_details = response.text or "No response body"
+                    else: error_details = "No response received from API."
 
-                    error_message = f"WooCommerce API Error syncing {template_display}. Status: {status_code}. Details: {error_details}"
+                    error_message = f"WooCommerce API Error syncing {template_display}. Action: {action}, Status: {status_code}. Details: {error_details}"
                     _logger.error(error_message)
                     template.sudo().write({'woo_sync_error': error_message})
-                    error_count += 1
-                    products_with_errors |= template
+                    error_count += 1; products_with_errors |= template
 
             except Exception as e:
-                # Catch unexpected errors during preparation or API call for THIS template
+                # Catch unexpected errors during the loop for a single product
                 error_msg = f"Unexpected error occurred while syncing {template_display}: {e}"
-                _logger.error(error_msg, exc_info=True) # Log full traceback
-                # Set error on the record if not already set by a sub-process
-                if not template.woo_sync_error:
+                _logger.error(error_msg, exc_info=True)
+                if not template.woo_sync_error: # Avoid overwriting specific API errors
                     template.sudo().write({'woo_sync_error': error_msg})
-                error_count += 1
-                products_with_errors |= template
+                error_count += 1; products_with_errors |= template
             finally:
-                # Small delay within the loop (processing items in the batch)
-                time.sleep(0.1) # Adjust as needed
+                # Optional small delay between processing each product in the loop
+                time.sleep(0.1)
 
         _logger.info(f"WooCommerce sync finished for this batch/selection. Processed: {len(products_to_process)}, Synced OK: {synced_count}, Errors: {error_count}")
         if products_with_errors:
-            _logger.error(f"Products with sync errors in this batch/selection: {products_with_errors.mapped('name')}")
-            # Raise error only if manually triggered AND there were errors in this specific call
-            # Batch method will handle overall success/failure reporting
-            if self.env.context.get('manual_sync_trigger') and error_count > 0:
-                 # This error might be too disruptive if called from the batch method.
-                 # Consider just logging and letting the batch method summarize.
-                 # For now, let's raise it if manually called.
-                 # raise UserError(_("Sync finished with errors for products: %s") % ', '.join(products_with_errors.mapped('name')))
-                 pass # Let the calling context decide how to report errors
+            _logger.error(f"Products with sync errors in this run: {products_with_errors.mapped('name')} (IDs: {products_with_errors.ids})")
+            # No UserError raised here for background/cron jobs, handled by batch methods if needed
+
+        return error_count == 0 # Return True if no errors, False otherwise
 
 
-        # Return True if no errors occurred during this batch/selection run, False otherwise
-        return error_count == 0
-
-
-    # --- _sync_woocommerce_variations ---
-    # (No changes needed in this method based on the request)
+    # --- _sync_woocommerce_variations (Unchanged) ---
     def _sync_woocommerce_variations(self, wcapi, woo_product_id, variation_attribute_names):
         """ Syncs product variants using batch API, handles image ID. Returns True on success, False if errors occurred."""
         self.ensure_one()
@@ -597,143 +848,103 @@ class ProductTemplate(models.Model):
             all_variations = []
             page = 1
             while True:
-                # Fetch variations in pages
                 response = wcapi.get(f"products/{woo_product_id}/variations", params={'per_page': 100, 'page': page})
                 response.raise_for_status()
                 current_page_variations = response.json()
                 if not current_page_variations:
-                    break # No more variations on subsequent pages
+                    break
                 all_variations.extend(current_page_variations)
+                if len(current_page_variations) < 100:
+                     break
                 page += 1
-                # Add a small delay between fetching pages if needed
                 time.sleep(0.1)
 
             for var_data in all_variations:
-                 if var_data.get('sku'): # Only map if SKU exists in Woo
+                 if var_data.get('sku'):
                      existing_variations_map[var_data['sku']] = var_data
-
             _logger.info(f"Found {len(existing_variations_map)} existing variations with SKU in WooCommerce for Woo Product ID {woo_product_id}.")
 
         except Exception as e:
             error_msg = f"Error fetching existing WooCommerce variations for Woo Product ID {woo_product_id}: {e}"
             _logger.error(error_msg, exc_info=True)
-            # Set error on template, as this prevents proper variation sync
             self.sudo().write({'woo_sync_error': f"Error fetching Woo variations: {e}"})
-            return False # Cannot proceed without knowing existing variations
+            return False
 
         # 2. Prepare batch data (create, update, delete)
         variation_batch_data = {'create': [], 'update': [], 'delete': []}
-        odoo_variant_map_by_sku = {} # Map SKU -> Odoo product.product record
-        odoo_variant_skus = set()   # Keep track of SKUs from Odoo variants being processed
-        variants_with_prep_errors = self.env['product.product'] # Track variants that failed preparation
+        odoo_variant_map_by_sku = {}
+        odoo_variant_skus = set()
+        variants_with_prep_errors = self.env['product.product']
 
         for variant in variants_to_sync:
-            # Clear previous variation-specific error
             variant.sudo().write({'woo_variation_sync_error': False})
-            variant_prep_success = True # Track success for this specific variant prep
+            variant_prep_success = True
 
-            # Ensure unique SKU for the variant (mandatory for variations)
             variant_sku = variant.default_code
             if not variant_sku:
-                 # Generate a fallback SKU if missing, ensure it's somewhat unique
                  variant_sku = f'odoo-var-{variant.id}'
-                 _logger.warning(f"Variant ID {variant.id} for template '{self.name}' is missing an SKU (default_code). Using generated SKU: {variant_sku}")
-                 # Consider if you want to enforce SKUs or auto-generate reliably
+                 _logger.warning(f"Variant ID {variant.id} for template '{self.name}' is missing an SKU. Using generated SKU: {variant_sku}")
 
             if variant_sku in odoo_variant_skus:
-                # Critical error: Duplicate SKU within the Odoo variants for this template
                 error_msg = f"Duplicate SKU '{variant_sku}' found for Odoo variants of template '{self.name}'. Cannot sync variations reliably."
                 _logger.error(error_msg)
-                # Set error on both the template and the specific variant causing issues
                 self.sudo().write({'woo_sync_error': error_msg})
                 variant.sudo().write({'woo_variation_sync_error': error_msg})
                 variants_with_prep_errors |= variant
                 overall_success = False
-                continue # Skip this variant
+                continue
 
             odoo_variant_skus.add(variant_sku)
             odoo_variant_map_by_sku[variant_sku] = variant
 
             try:
-                # Prepare payload for this specific variation
                 variation_payload = {'sku': variant_sku}
                 attributes_payload = []
                 valid_attributes_found = False
 
-                # Map Odoo variant attribute values to Woo attributes
                 for ptav in variant.product_template_attribute_value_ids:
-                    # ptav = product.template.attribute.value record linking template, attribute, and value
-                    # We need the attribute name (from attribute_id) and the value name (from product_attribute_value_id)
                     attribute_name = ptav.attribute_id.name
                     attribute_value_name = ptav.product_attribute_value_id.name
-
-                    # Only include attributes that are designated for variation use (from template prep)
                     if attribute_name in variation_attribute_names:
-                        attributes_payload.append({
-                            'name': attribute_name, # The name of the attribute (e.g., 'Color', 'Size')
-                            'option': attribute_value_name # The specific value (e.g., 'Red', 'XL')
-                        })
+                        attributes_payload.append({'name': attribute_name, 'option': attribute_value_name})
                         valid_attributes_found = True
 
                 if not valid_attributes_found and variation_attribute_names:
-                    # This variant doesn't seem to have valid attributes for variation matching, AND the template expects variation attributes
-                    error_msg = f"Variant '{variant.display_name}' (SKU: {variant_sku}) has no attribute values matching the template's variation attributes ({variation_attribute_names}). Cannot sync as variation."
+                    error_msg = f"Variant '{variant.display_name}' (SKU: {variant_sku}) has no attribute values matching template's variation attributes ({variation_attribute_names}). Cannot sync as variation."
                     _logger.error(error_msg)
                     variant.sudo().write({'woo_variation_sync_error': error_msg})
                     variants_with_prep_errors |= variant
                     variant_prep_success = False
                     overall_success = False
-                    continue # Skip adding this variant payload
+                    continue
 
                 variation_payload['attributes'] = attributes_payload
 
-                # Sync Price, Stock, Image for the variation
-                if sync_price:
-                    variation_payload['regular_price'] = str(variant.lst_price)
-                    # Add sale price if applicable and configured
-                    # sale_price = getattr(variant, 'sale_price_field_name', None) # Replace with your actual sale price field if exists
-                    # if sale_price: variation_payload['sale_price'] = str(sale_price)
-
+                if sync_price: variation_payload['regular_price'] = str(variant.lst_price)
                 if sync_stock:
                     variation_payload['manage_stock'] = True
                     stock_qty = int(variant.qty_available)
                     variation_payload['stock_quantity'] = stock_qty
                     variation_payload['stock_status'] = 'instock' if stock_qty > 0 else 'outofstock'
-                    # variation_payload['backorders'] = 'no' / 'notify' / 'yes'
 
                 if sync_image:
-                    # Clear previous variation image error
                     if variant.woo_variation_sync_error and any(term in variant.woo_variation_sync_error for term in ['image', 'WP', 'Media']):
                          variant.sudo().write({'woo_variation_sync_error': False})
-
-                    # Upload image using variant's image field
-                    # This now calls the variant's _upload_image_to_wp which delegates to template's logic
                     media_id = variant._upload_image_to_wp('image_1920', 'variant', variant.id)
-                    if media_id:
-                        variation_payload['image'] = {'id': media_id}
-                    # If upload fails, _upload_image_to_wp sets the error on the variant
-                    if variant.woo_variation_sync_error:
-                        _logger.warning(f"Image upload failed for variant SKU {variant_sku}. Proceeding without image for this variation.")
-                        variants_with_prep_errors |= variant # Mark as having issues, even if non-blocking
-                        # Decide if image failure should block variation sync (currently does not)
-                        # variant_prep_success = False # Uncomment if image is mandatory
-                        # overall_success = False # Uncomment if image is mandatory
+                    if media_id: variation_payload['image'] = {'id': media_id}
+                    elif variant.woo_variation_sync_error:
+                        _logger.warning(f"Image upload failed for variant SKU {variant_sku}. Proceeding without image.")
+                        variants_with_prep_errors |= variant
 
-
-                # Determine if creating or updating based on SKU map
-                if variant_prep_success: # Only add if preparation was successful
+                if variant_prep_success:
                     existing_woo_variation = existing_variations_map.get(variant_sku)
                     if existing_woo_variation:
-                        # Update existing variation
                         variation_payload['id'] = existing_woo_variation['id']
                         variation_batch_data['update'].append(variation_payload)
-                        # Ensure Odoo has the correct Woo Variation ID stored
                         if str(variant.woo_variation_id) != str(existing_woo_variation['id']):
                             variant.sudo().write({'woo_variation_id': str(existing_woo_variation['id'])})
                     else:
-                        # Create new variation
                         variation_batch_data['create'].append(variation_payload)
-                        # Clear any potentially stale Woo Variation ID
                         if variant.woo_variation_id:
                             variant.sudo().write({'woo_variation_id': False})
 
@@ -744,163 +955,112 @@ class ProductTemplate(models.Model):
                 variants_with_prep_errors |= variant
                 overall_success = False
 
-
-        # 3. Determine variations to delete (exist in Woo SKU map but not in Odoo SKUs for this sync)
+        # 3. Determine variations to delete
         woo_skus_to_delete = set(existing_variations_map.keys()) - odoo_variant_skus
         for woo_sku_del in woo_skus_to_delete:
             woo_var_id_del = existing_variations_map[woo_sku_del]['id']
-            _logger.warning(f"Variation with SKU '{woo_sku_del}' (Woo Variation ID: {woo_var_id_del}) exists in WooCommerce but not found in Odoo variants for template '{self.name}'. Adding to delete batch.")
+            _logger.warning(f"Variation SKU '{woo_sku_del}' (Woo ID: {woo_var_id_del}) exists in Woo but not Odoo. Adding to delete batch.")
             variation_batch_data['delete'].append(woo_var_id_del)
 
-
-        # 4. Execute Batch API call if there's anything to sync
-        if any(variation_batch_data.values()): # Check if any create/update/delete lists are non-empty
+        # 4. Execute Batch API call
+        if any(variation_batch_data.values()):
             try:
                 batch_endpoint = f"products/{woo_product_id}/variations/batch"
-                _logger.info(f"Executing variation batch sync for Woo Product ID {woo_product_id}: "
-                             f"Create: {len(variation_batch_data['create'])}, "
-                             f"Update: {len(variation_batch_data['update'])}, "
-                             f"Delete: {len(variation_batch_data['delete'])}")
-
-                # Log the full batch payload if debugging is needed
-                # _logger.debug(f"Variation Batch Payload: {json.dumps(variation_batch_data, indent=2)}")
-
+                _logger.info(f"Executing variation batch sync for Woo Product ID {woo_product_id}: Create: {len(variation_batch_data['create'])}, Update: {len(variation_batch_data['update'])}, Delete: {len(variation_batch_data['delete'])}")
                 response = wcapi.post(batch_endpoint, variation_batch_data)
-                response.raise_for_status() # Check for HTTP errors on the batch call itself
+                response.raise_for_status()
                 result = response.json()
                 now_time = fields.Datetime.now()
-
                 _logger.info(f"Variation batch sync completed for Woo Product ID {woo_product_id}.")
 
-                # --- Process Batch Response ---
-                # Handle Creates
-                for created_var_resp in result.get('create', []):
-                    resp_sku = created_var_resp.get('sku')
-                    odoo_variant = odoo_variant_map_by_sku.get(resp_sku)
-                    if not odoo_variant:
-                        _logger.warning(f"Received create response for unknown SKU '{resp_sku}'.")
-                        continue
+                # Process Batch Response (Create, Update, Delete) - Condensed error handling
+                for op_type, responses in result.items():
+                    if op_type not in ['create', 'update', 'delete']: continue
+                    for resp_item in responses:
+                        item_id = resp_item.get('id')
+                        item_sku = resp_item.get('sku')
+                        error = resp_item.get('error')
+                        log_prefix = f"Batch {op_type.capitalize()}"
+                        odoo_variant = None
+                        if op_type != 'delete':
+                            odoo_variant = odoo_variant_map_by_sku.get(item_sku)
+                            if not odoo_variant and op_type == 'update': # Find by ID for update if SKU missing
+                                 odoo_variant = self.env['product.product'].search([('woo_variation_id', '=', str(item_id))], limit=1)
+                        elif op_type == 'delete': # Log deletion target
+                            log_prefix += f" for Woo ID {item_id}"
 
-                    if created_var_resp.get('error'):
-                        error = created_var_resp['error']
-                        error_msg = f"Batch Create Error: {error.get('code')} - {error.get('message')}"
-                        _logger.error(f"Failed to create variation for SKU '{resp_sku}'. Error: {error_msg}")
-                        odoo_variant.sudo().write({'woo_variation_sync_error': error_msg})
-                        overall_success = False # Mark overall failure
-                    elif created_var_resp.get('id'):
-                        # Success: Store new Woo Variation ID and update sync date
-                        new_woo_var_id = str(created_var_resp['id'])
-                        odoo_variant.sudo().write({
-                            'woo_variation_id': new_woo_var_id,
-                            'woo_variation_last_sync_date': now_time,
-                            'woo_variation_sync_error': False # Clear error on success
-                        })
-                        _logger.info(f"Successfully created variation. Stored Woo Variation ID {new_woo_var_id} for SKU {resp_sku}")
-                    else:
-                         _logger.error(f"Unexpected create response for SKU '{resp_sku}': {created_var_resp}")
-                         odoo_variant.sudo().write({'woo_variation_sync_error': "Unexpected create response from batch API"})
-                         overall_success = False
-
-                # Handle Updates
-                for updated_var_resp in result.get('update', []):
-                    resp_id = updated_var_resp.get('id')
-                    resp_sku = updated_var_resp.get('sku') # SKU might be in response too
-                    # Find Odoo variant, preferably by stored ID, fallback to SKU map
-                    odoo_variant = self.env['product.product'].search([('woo_variation_id', '=', str(resp_id))], limit=1)
-                    if not odoo_variant and resp_sku:
-                        odoo_variant = odoo_variant_map_by_sku.get(resp_sku)
-
-                    if not odoo_variant:
-                         _logger.warning(f"Received update response for unknown Woo Variation ID '{resp_id}' / SKU '{resp_sku}'.")
-                         continue
-
-                    if updated_var_resp.get('error'):
-                        error = updated_var_resp['error']
-                        error_msg = f"Batch Update Error: {error.get('code')} - {error.get('message')}"
-                        _logger.error(f"Failed to update variation Woo ID {resp_id} (SKU: {resp_sku}). Error: {error_msg}")
-                        odoo_variant.sudo().write({'woo_variation_sync_error': error_msg})
-                        overall_success = False
-                    elif resp_id:
-                        # Success: Update sync date, clear error
-                        odoo_variant.sudo().write({
-                            'woo_variation_last_sync_date': now_time,
-                            'woo_variation_sync_error': False
-                        })
-                        _logger.info(f"Successfully updated variation Woo ID {resp_id} (SKU: {resp_sku})")
-                    else:
-                        _logger.error(f"Unexpected update response for Woo ID '{resp_id}' / SKU '{resp_sku}': {updated_var_resp}")
-                        odoo_variant.sudo().write({'woo_variation_sync_error': "Unexpected update response from batch API"})
-                        overall_success = False
-
-                # Handle Deletes
-                for deleted_var_resp in result.get('delete', []):
-                    resp_id = deleted_var_resp.get('id')
-                    # Find corresponding Odoo variant if needed (e.g., to clear fields), though it should already be gone from odoo_variant_skus
-                    # odoo_variant_deleted = self.env['product.product'].search([('woo_variation_id', '=', str(resp_id))], limit=1)
-
-                    if deleted_var_resp.get('error'):
-                        error = deleted_var_resp['error']
-                        error_msg = f"Batch Delete Error: {error.get('code')} - {error.get('message')}"
-                        _logger.error(f"Failed to delete variation Woo ID {resp_id}. Error: {error_msg}")
-                        # Cannot set error on Odoo record as it doesn't exist/match anymore
-                        # Maybe set a general error on the template?
-                        self.sudo().write({'woo_sync_error': f"Failed to delete Woo Variation ID {resp_id}: {error_msg}"})
-                        overall_success = False
-                    elif resp_id:
-                        _logger.info(f"Successfully processed delete request for variation Woo ID {resp_id}")
-                        # If found, clear woo_variation_id field on the Odoo variant that *was* deleted in Woo
-                        # variant_to_clear = self.env['product.product'].search([('woo_variation_id', '=', str(resp_id))], limit=1)
-                        # if variant_to_clear: variant_to_clear.sudo().write({'woo_variation_id': False, 'woo_variation_sync_error': 'Deleted from WooCommerce'})
+                        if error:
+                            error_msg = f"{log_prefix} Error: {error.get('code')} - {error.get('message')}"
+                            _logger.error(f"Failed variation {op_type} for SKU '{item_sku or 'N/A'}' / Woo ID '{item_id}'. Error: {error_msg}")
+                            if odoo_variant: odoo_variant.sudo().write({'woo_variation_sync_error': error_msg})
+                            overall_success = False
+                        elif item_id:
+                            _logger.info(f"Successfully processed variation {op_type} for SKU '{item_sku or 'N/A'}' / Woo ID {item_id}.")
+                            if odoo_variant and op_type != 'delete':
+                                vals = {'woo_variation_last_sync_date': now_time, 'woo_variation_sync_error': False}
+                                if op_type == 'create': vals['woo_variation_id'] = str(item_id)
+                                odoo_variant.sudo().write(vals)
+                            elif op_type == 'delete': # Clear ID on Odoo variant if found
+                                variant_to_clear = self.env['product.product'].search([('product_tmpl_id', '=', self.id), ('woo_variation_id', '=', str(item_id))], limit=1)
+                                if variant_to_clear: variant_to_clear.sudo().write({'woo_variation_id': False, 'woo_variation_sync_error': 'Deleted from Woo.'})
+                        else: # Unexpected response
+                             _logger.error(f"Unexpected {op_type} response for SKU '{item_sku or 'N/A'}' / Woo ID '{item_id}': {resp_item}")
+                             if odoo_variant: odoo_variant.sudo().write({'woo_variation_sync_error': f"Unexpected {op_type} batch response"})
+                             overall_success = False
 
 
             except (requests.exceptions.RequestException, UserError, Exception) as e_batch:
-                # Catch errors during the batch API call itself or response processing
-                error_msg = f"Error during variation batch sync for Woo Product ID {woo_product_id}: {e_batch}"
+                error_msg = f"Error during variation batch sync API call for Woo Product ID {woo_product_id}: {e_batch}"
                 _logger.error(error_msg, exc_info=True)
-                # Set a general error on the template for batch failures
                 self.sudo().write({'woo_sync_error': f"Variation Batch Sync Error: {e_batch}"})
-                # Potentially mark all variants involved in the batch as having an error
                 for variant in variants_to_sync - variants_with_prep_errors:
-                     if not variant.woo_variation_sync_error: # Avoid overwriting specific prep errors
+                     if not variant.woo_variation_sync_error:
                          variant.sudo().write({'woo_variation_sync_error': "Batch sync API call failed."})
                 overall_success = False
         else:
             _logger.info(f"No variation changes detected to sync via batch for Woo Product ID {woo_product_id}.")
 
-        # Return True if no errors occurred during preparation or batch processing, False otherwise
         return overall_success
 
 
-    # --- Cron Job ---
-    # (No changes needed in this method based on the request)
+    # --- Cron Job (Unchanged - Relies on underlying methods) ---
     @api.model
     def _cron_sync_woocommerce(self):
         """ Scheduled action to sync all enabled products. """
         _logger.info("Starting scheduled WooCommerce sync via Cron...")
-        # Use a specific context for cron to differentiate from manual triggers
-        cron_context = {'manual_sync_trigger': False}
+        cron_context = {'manual_sync_trigger': False} # Identify as non-manual trigger
         ProductTemplate = self.with_context(cron_context)
 
-        # Check if sync is active and credentials are valid before searching products
+        # --- Check API Connection Early ---
         try:
-            # Use with_context when calling API client getter
             wcapi_test = ProductTemplate._get_woo_api_client()
             if wcapi_test is None:
-                _logger.info("Scheduled sync skipped (sync not active or API credentials invalid/missing).")
+                _logger.info("Scheduled sync skipped (sync not active or API client setup failed).")
                 return
         except Exception as e:
              _logger.error(f"Scheduled sync aborted during API client initialization: {e}", exc_info=True)
-             return # Don't proceed if basic connection fails
+             return
 
-        # Find all products enabled for sync
+        # --- Fetch Live Categories ONCE for the entire cron run ---
+        _logger.info("CRON: Fetching live WooCommerce categories...")
+        live_category_data = ProductTemplate._fetch_live_woo_category_data(wcapi_test) # Use the tested client
+        if live_category_data is None:
+            _logger.error("CRON: Aborting sync run. Failed to fetch live WooCommerce categories at the start.")
+            # Consider creating a notification/activity for admin
+            return
+        live_category_names_for_gpt = list(live_category_data.keys()) # Keys are already lowercase
+        _logger.info(f"CRON: Fetched {len(live_category_data)} live categories.")
+        # --- End Fetch ---
+
         products_to_sync = ProductTemplate.search([('woo_sync_enabled', '=', True)])
 
         if products_to_sync:
             _logger.info(f"Cron: Found {len(products_to_sync)} product templates enabled for sync.")
-            # Process in batches using the existing cron batching logic
-            # We are NOT using the new sync_to_woocommerce_in_batches here,
-            # as the cron job needs to manage its own potentially larger batches.
-            batch_size = 5 # Keep the cron's batch size (or make configurable)
+            # Get batch size from system parameter or default
+            batch_size_str = self.env['ir.config_parameter'].sudo().get_param('odoo_woo_sync.cron_batch_size', '50')
+            try: batch_size = int(batch_size_str)
+            except ValueError: batch_size = 50
+            if batch_size <= 0: batch_size = 50 # Ensure positive batch size
             total_batches = (len(products_to_sync) + batch_size - 1) // batch_size
 
             for i in range(0, len(products_to_sync), batch_size):
@@ -909,190 +1069,193 @@ class ProductTemplate(models.Model):
                 _logger.info(f"Cron: Processing batch {current_batch_num}/{total_batches} ({len(batch)} products)")
 
                 try:
-                    # Call the main sync method for the batch, passing cron context
-                    # The sync_to_woocommerce method handles the items in 'batch'
-                    batch_success = batch.sync_to_woocommerce()
-                    # Commit transaction after each batch attempt (success or failure handled within sync_to_woocommerce)
+                    # --- Pass live category info to the batch sync call via context ---
+                    batch_context = cron_context.copy()
+                    batch_context['live_category_data'] = live_category_data
+                    batch_context['live_category_names_for_gpt'] = live_category_names_for_gpt
+
+                    # Call sync_to_woocommerce on the batch with the context
+                    batch_success = batch.with_context(batch_context).sync_to_woocommerce()
+
                     if batch_success:
-                         self.env.cr.commit()
-                         _logger.info(f"Cron: Batch {current_batch_num} processed and committed.")
+                         self.env.cr.commit() # Commit after each successful batch
+                         _logger.info(f"Cron: Batch {current_batch_num} processed and committed successfully.")
                     else:
                          _logger.warning(f"Cron: Batch {current_batch_num} processed with errors. Committing partial success/errors.")
-                         self.env.cr.commit() # Commit even with errors to save error messages on records
-                         # Consider rollback if partial success is not desired:
-                         # self.env.cr.rollback()
-                         # _logger.info(f"Cron: Rolled back changes for batch {current_batch_num} due to errors.")
-
-
+                         self.env.cr.commit() # Commit even if there were errors in the batch
                 except Exception as e:
-                    # Catch errors that might occur *outside* sync_to_woocommerce during batch handling
-                    _logger.error(f"Critical Error occurred processing cron batch {current_batch_num}: {e}", exc_info=True)
-                    # Rollback changes for the failed batch
-                    self.env.cr.rollback()
+                    _logger.error(f"Cron: Critical Error occurred processing batch {current_batch_num}. Error: {e}", exc_info=True)
+                    self.env.cr.rollback() # Rollback the transaction for the failed batch
                     _logger.info(f"Cron: Rolled back changes for batch {current_batch_num} due to critical error.")
-                    # Consider adding failed batch product IDs to a list for retry or reporting
+                    # Consider adding a delay or stopping the cron after a critical error
 
-                # Optional: Small delay between batches
-                time.sleep(1) # Be mindful of total cron execution time
-
+                # Optional delay between batches
+                time.sleep(1)
         else:
             _logger.info("Cron: No product templates found enabled for WooCommerce sync.")
 
         _logger.info("Scheduled WooCommerce sync finished.")
 
-    # --- NEW BATCHING METHOD ---
-    # (No changes needed in this method based on the request)
-    def sync_to_woocommerce_in_batches(self, batch_size=5):
+    # --- Cron for GPT Enrichment Preview (Unchanged - Relies on underlying methods) ---
+    @api.model
+    def _cron_gpt_enrichment_preview(self):
         """
-        Syncs enabled product templates within 'self' to WooCommerce in small batches.
-        Handles transaction commit/rollback per batch.
-        Intended to be called manually (e.g., from a wizard).
+        Cron job that runs GPT enrichment on products enabled for sync,
+        using live categories, but does NOT push to WooCommerce or save changes.
+        Logs the potential enrichment data.
         """
-        # Use context to indicate manual trigger if not already set (important for error handling in sub-methods)
-        batch_context = self.env.context.copy()
-        batch_context['manual_sync_trigger'] = True # Assume manual when called this way
+        _logger.info("Running GPT enrichment preview cron (using live categories, no Woo sync/save)...")
+        preview_context = {'manual_sync_trigger': False}
+        ProductTemplate = self.env['product.template'].with_context(preview_context)
 
-        # Filter the initial recordset ('self') for enabled products
-        enabled_products = self.filtered('woo_sync_enabled')
-        if not enabled_products:
-            # Raise error directly if called manually and nothing is enabled in the selection
-            if len(self) > 0: # Check if the original selection was not empty
-                raise UserError(_("None of the selected products are enabled for WooCommerce sync."))
-            else:
-                 _logger.info("Batch Sync: No enabled products found in the provided selection.")
-                 return True # Nothing to do
+        # --- Need API client to fetch categories ---
+        try:
+            wcapi = ProductTemplate._get_woo_api_client()
+            if wcapi is None:
+                _logger.error("GPT Preview Cron: Cannot run, sync disabled or API client setup failed.")
+                return
+        except Exception as e:
+             _logger.error(f"GPT Preview Cron: Aborted during API client initialization: {e}", exc_info=True)
+             return
+        # --- End API client fetch ---
 
-        total_products = len(enabled_products)
-        total_batches = (total_products + batch_size - 1) // batch_size
-        _logger.info(f"Batch Sync: Starting sync for {total_products} enabled products in {total_batches} batches (batch size: {batch_size})")
+        # --- Fetch Live Categories for the preview run ---
+        live_category_data = ProductTemplate._fetch_live_woo_category_data(wcapi)
+        if live_category_data is None:
+            _logger.warning("GPT Preview Cron: Failed to fetch live WooCommerce categories. Preview will run without category constraints.")
+            live_category_names_for_gpt = []
+        else:
+            live_category_names_for_gpt = list(live_category_data.keys()) # Already lowercase
+        # --- End Fetch ---
 
-        all_batches_successful = True # Track overall success
+        products_to_enrich = ProductTemplate.search([('woo_sync_enabled', '=', True)])
 
-        for i in range(0, total_products, batch_size):
-            batch = enabled_products[i:i + batch_size]
-            current_batch_num = (i // batch_size) + 1
-            _logger.info(f"Batch Sync: Processing batch {current_batch_num}/{total_batches} (Products: {len(batch)})")
+        if not products_to_enrich:
+            _logger.info("GPT Preview Cron: No products found with Woo sync enabled.")
+            return
 
+        _logger.info(f"GPT Preview Cron: Found {len(products_to_enrich)} products to preview enrichment for.")
+        enriched_count = 0; error_count = 0; skipped_count = 0
+
+        for product in products_to_enrich:
+            product_display = f"'{product.name}' (ID:{product.id})"
             try:
-                # Call the core sync logic for the current batch, passing the context
-                batch_success = batch.with_context(batch_context).sync_to_woocommerce()
+                # Call GPT enrichment directly (does not modify the record)
+                # Pass live category names
+                enriched_data = product._get_gpt_enriched_data(
+                    product.name,
+                    live_category_names=live_category_names_for_gpt
+                )
 
-                if batch_success:
-                    self.env.cr.commit()
-                    _logger.info(f"Batch {current_batch_num} sync completed successfully and committed.")
+                if enriched_data:
+                    # Log the structured preview data
+                    _logger.info(f"GPT Enrichment Preview for {product_display}:\n{json.dumps(enriched_data, indent=2)}")
+                    enriched_count += 1
                 else:
-                     # sync_to_woocommerce returned False, indicating errors occurred within the batch
-                     _logger.warning(f"Batch {current_batch_num} sync completed with errors. Committing state (including error messages).")
-                     self.env.cr.commit() # Commit to save error messages set by sync_to_woocommerce
-                     all_batches_successful = False # Mark that at least one batch had issues
-                     # Optionally rollback if partial success isn't desired:
-                     # self.env.cr.rollback()
-                     # _logger.warning(f"Batch {current_batch_num} sync failed. Rolling back changes for this batch.")
-
+                    # Log if GPT was disabled or returned nothing
+                    _logger.info(f"No enrichment data returned for {product_display}. (GPT disabled or no suggestions)")
+                    skipped_count +=1
 
             except Exception as e:
-                # Catch unexpected errors during the batch processing (e.g., commit failure, or error raised by sync_to_woocommerce)
-                self.env.cr.rollback()
-                _logger.error(f"Batch Sync: Critical error processing batch {current_batch_num}. Rolled back. Error: {e}", exc_info=True)
+                _logger.error(f"Error during GPT enrichment preview for {product_display}: {e}", exc_info=True)
+                error_count += 1
+            finally:
+                # Add a small delay to avoid hitting API rate limits if applicable
+                time.sleep(0.2) # Adjust as needed
+
+        _logger.info(f"GPT Enrichment Preview Cron finished. Checked: {len(products_to_enrich)}, Enriched Previews Logged: {enriched_count}, Skipped/No Data: {skipped_count}, Errors: {error_count}")
+
+    # --- Batching Method (Unchanged - Relies on underlying methods) ---
+    def sync_to_woocommerce_in_batches(self, batch_size=30):
+        """
+        Action method to sync enabled product templates within 'self' (current selection/recordset)
+        to WooCommerce in small batches. Fetches live categories once and uses them for the entire run.
+        Intended for manual triggering (e.g., from Action menu).
+        """
+        batch_context = self.env.context.copy()
+        batch_context['manual_sync_trigger'] = True # Ensure context indicates manual trigger
+
+        enabled_products = self.filtered('woo_sync_enabled')
+        if not enabled_products:
+            if len(self) > 0: raise UserError(_("None of the selected products are enabled for WooCommerce sync."))
+            else: _logger.info("Batch Sync Action: No enabled products found in selection."); return True # No action needed
+
+        # --- Get API client early & Fetch Live Categories ONCE ---
+        try:
+            wcapi = self.with_context(batch_context)._get_woo_api_client() # Will raise UserError if fails on manual trigger
+            if wcapi is None: return False # Should not happen if UserError is raised, but defensive check
+
+            _logger.info("Batch Sync Action: Fetching live categories for the run...")
+            live_category_data = self._fetch_live_woo_category_data(wcapi)
+            if live_category_data is None:
+                # Fail loudly for manual action if categories can't be fetched
+                raise UserError(_("Failed to fetch live WooCommerce categories. Cannot proceed with sync. Check connection and API logs."))
+
+            live_category_names_for_gpt = list(live_category_data.keys()) # Already lowercase
+        except (UserError, Exception) as e:
+             # Catch connection errors or UserErrors raised during client/category fetch
+             _logger.error(f"Batch Sync Action: Aborted during initialization: {e}", exc_info=True)
+             # Re-raise UserError to show to the user
+             raise UserError(_("Failed to initialize sync: %s") % e)
+
+        # --- Process in Batches ---
+        total_products = len(enabled_products)
+        effective_batch_size = batch_size
+        if effective_batch_size <= 0: effective_batch_size = 30 # Default if invalid size given
+        total_batches = (total_products + effective_batch_size - 1) // effective_batch_size
+        _logger.info(f"Batch Sync Action: Starting sync for {total_products} selected/enabled products in {total_batches} batches (size: {effective_batch_size})")
+
+        all_batches_successful = True
+        overall_error_messages = []
+
+        for i in range(0, total_products, effective_batch_size):
+            batch = enabled_products[i:i + effective_batch_size]
+            current_batch_num = (i // effective_batch_size) + 1
+            _logger.info(f"Batch Sync Action: Processing batch {current_batch_num}/{total_batches} (Products: {len(batch)})")
+
+            try:
+                # Pass live category info via context to the underlying sync method
+                current_batch_context = batch_context.copy()
+                current_batch_context['live_category_data'] = live_category_data
+                current_batch_context['live_category_names_for_gpt'] = live_category_names_for_gpt
+
+                batch_success = batch.with_context(current_batch_context).sync_to_woocommerce()
+
+                if batch_success:
+                    self.env.cr.commit() # Commit after each successful batch
+                    _logger.info(f"Batch {current_batch_num} sync completed successfully and committed.")
+                else:
+                     _logger.warning(f"Batch {current_batch_num} sync completed with errors. Committing state.")
+                     self.env.cr.commit() # Commit state even with errors
+                     all_batches_successful = False
+                     # Collect errors from the batch
+                     batch_errors = batch.filtered(lambda p: p.woo_sync_error).mapped(lambda p: f"{p.name}: {p.woo_sync_error}")
+                     overall_error_messages.extend(batch_errors)
+
+            except Exception as e:
+                # Catch critical errors during a batch's execution
+                self.env.cr.rollback() # Rollback the failed batch
+                _logger.error(f"Batch Sync Action: Critical error processing batch {current_batch_num}. Rolled back. Error: {e}", exc_info=True)
                 all_batches_successful = False
-                # Option 1: Stop processing further batches on critical error
-                # raise UserError(_("Critical error during batch %s: %s. Aborting further batches.") % (current_batch_num, e))
-                # Option 2: Continue to the next batch (current implementation)
-                _logger.info(f"Batch Sync: Continuing to next batch despite error in batch {current_batch_num}.")
+                error_msg = f"Critical error in batch {current_batch_num}: {e}"
+                overall_error_messages.append(error_msg)
+                # Ask user whether to continue or stop? For now, continue.
+                _logger.info(f"Batch Sync Action: Continuing to next batch despite critical error in batch {current_batch_num}.")
 
+            # Optional delay between batches for manual action as well
+            time.sleep(0.5) # Shorter delay might be okay for manual actions
 
-            # Slight delay between batches regardless of success/failure
-            time.sleep(1)
+        _logger.info(f"Batch Sync Action finished processing all {total_batches} batches.")
 
-        _logger.info(f"Batch Sync finished processing all {total_batches} batches.")
-        return all_batches_successful # Return overall status
-
-
-# --- product.product Model ---
-# Inherit product.product to add variation-specific fields and helpers
-# (No changes needed in this class based on the request)
-class ProductProduct(models.Model):
-    _inherit = 'product.product'
-
-    # --- Fields for Variation Sync Status ---
-    woo_variation_id = fields.Char(
-        string="WooCommerce Variation ID",
-        copy=False,
-        readonly=True,
-        index=True, # Index for searching by Woo ID
-        help="The ID of this specific product variation in WooCommerce."
-    )
-    # Link to template's sync enabled status for visibility on variant form
-    woo_sync_enabled = fields.Boolean(
-        related='product_tmpl_id.woo_sync_enabled',
-        store=False, # No need to store, just for display
-        readonly=True,
-        string="Sync Enabled (Template)"
-    )
-    woo_variation_last_sync_date = fields.Datetime(
-        string="Variation Last Sync Date",
-        copy=False,
-        readonly=True,
-        help="Timestamp of the last successful synchronization of this variation."
-    )
-    woo_variation_sync_error = fields.Text(
-        string="Variation Sync Error",
-        copy=False,
-        readonly=True,
-        help="Details of the last synchronization error specific to this variation, if any."
-    )
-
-    # --- Helper Method for Variant Image Upload ---
-    # This delegates image upload logic to the template's method but uses variant's data
-    def _upload_image_to_wp(self, image_field_name, record_name, record_id):
-        """
-        Uploads an image for this variant using the template's WP session and logic.
-        It ensures the variant's image data is used and errors are set on the variant.
-        """
-        self.ensure_one()
-        if not self.product_tmpl_id:
-             error_msg = 'Cannot sync variant image: Missing parent template link.'
-             _logger.error(f"{error_msg} for variant {self.id}")
-             self.sudo().write({'woo_variation_sync_error': error_msg})
-             return None
-
-        # Call the *template's* _upload_image_to_wp method,
-        # but it will internally use getattr(self, image_field_name) where 'self' is this variant record.
-        # Pass correct record_name and record_id for logging/filename purposes.
-        return self.product_tmpl_id._upload_image_to_wp(image_field_name, 'variant', self.id)
-
-
-    # --- Sync Button Action (Optional: Button on Variant Form) ---
-    # (No changes needed in this method based on the request)
-    def action_sync_variant_parent_to_woocommerce(self):
-        """
-        Button action placed on the product.product (variant) form
-        to trigger the synchronization process for its parent template using BATCHING.
-        """
-        templates_to_sync = self.mapped('product_tmpl_id')
-        if not templates_to_sync:
-            raise UserError(_("No parent product template found for the selected variant(s)."))
-
-        # Check if the template is actually enabled for sync
-        enabled_templates = templates_to_sync.filtered('woo_sync_enabled')
-        if not enabled_templates:
-             raise UserError(_("WooCommerce sync is not enabled for the parent product template(s) of the selected variant(s). Please enable sync on the template first."))
-
-        _logger.info(f"Manual sync trigger initiated from variant form for template(s): {enabled_templates.mapped('name')}. Using batch sync.")
-
-        # Call the BATCH sync method on the template(s)
-        # Use a small batch size appropriate for a manual trigger on potentially few templates
-        batch_success = enabled_templates.sync_to_woocommerce_in_batches(batch_size=5)
-
-        # Provide user feedback based on overall success
-        if batch_success:
-             message = _('Synchronization complete for parent template(s): %s. Check logs or template/variant status for details.') % ', '.join(enabled_templates.mapped('name'))
-             notif_type = 'success'
-             title = _('WooCommerce Sync Completed')
+        # --- Provide Feedback to User ---
+        if all_batches_successful:
+            message = _('WooCommerce sync completed successfully for %d products.') % total_products
+            notif_type = 'success'
+            title = _('Sync Completed')
         else:
-             message = _('Synchronization finished with errors for parent template(s): %s. Please check logs and template/variant error fields.') % ', '.join(enabled_templates.mapped('name'))
-             notif_type = 'warning' # Use warning as some might have succeeded
-             title = _('WooCommerce Sync Finished with Errors')
+            message = _('WooCommerce sync finished with errors for %d products. Check logs and product sync error fields for details.\n\nSummary:\n%s') % (total_products, '\n'.join(overall_error_messages[:10])) # Show first 10 errors
+            notif_type = 'warning'
+            title = _('Sync Finished with Errors')
 
         return {
             'type': 'ir.actions.client',
@@ -1100,7 +1263,56 @@ class ProductProduct(models.Model):
             'params': {
                 'title': title,
                 'message': message,
-                'sticky': False, # Notification disappears automatically
-                'type': notif_type, # 'info', 'warning', 'danger', 'success'
+                'sticky': not all_batches_successful, # Keep error messages sticky
+                'type': notif_type
             }
         }
+
+
+# --- product.product Model (Unchanged) ---
+class ProductProduct(models.Model):
+    _inherit = 'product.product'
+
+    # --- Fields for Variation Sync Status ---
+    woo_variation_id = fields.Char( string="WooCommerce Variation ID", copy=False, readonly=True, index=True, help="The ID of this specific product variation in WooCommerce.")
+    woo_sync_enabled = fields.Boolean( related='product_tmpl_id.woo_sync_enabled', store=False, readonly=True, string="Sync Enabled (Template)" )
+    woo_variation_last_sync_date = fields.Datetime( string="Variation Last Sync Date", copy=False, readonly=True, help="Timestamp of the last successful synchronization of this variation." )
+    woo_variation_sync_error = fields.Text( string="Variation Sync Error", copy=False, readonly=True, help="Details of the last synchronization error specific to this variation, if any." )
+
+    # --- Helper Method for Variant Image Upload (Relies on Template Method) ---
+    def _upload_image_to_wp(self, image_field_name, record_name, record_id):
+        """ Delegates image upload to the product template's method. """
+        self.ensure_one()
+        if not self.product_tmpl_id:
+             error_msg = 'Cannot sync variant image: Missing parent product template link.'
+             _logger.error(f"{error_msg} for variant {self.id} (SKU: {self.default_code or 'N/A'})")
+             self.sudo().write({'woo_variation_sync_error': error_msg})
+             return None
+
+        # Check if the template method exists before calling
+        if hasattr(self.product_tmpl_id, '_upload_image_to_wp') and callable(getattr(self.product_tmpl_id, '_upload_image_to_wp')):
+             return self.product_tmpl_id._upload_image_to_wp(image_field_name, 'variant', self.id)
+        else:
+             error_msg = 'Cannot sync variant image: Parent template is missing the required _upload_image_to_wp method.'
+             _logger.error(f"{error_msg} for variant {self.id} (SKU: {self.default_code or 'N/A'})")
+             self.sudo().write({'woo_variation_sync_error': error_msg})
+             return None
+
+    # --- Sync Button Action (Calls Template Batch Method) ---
+    def action_sync_variant_parent_to_woocommerce(self):
+        """
+        Action button on the product.product (variant) form.
+        Triggers the batch sync action on the parent template(s) of the selected variants.
+        """
+        templates_to_sync = self.mapped('product_tmpl_id')
+        if not templates_to_sync:
+            raise UserError(_("No parent product template found for the selected variant(s)."))
+
+        enabled_templates = templates_to_sync.filtered('woo_sync_enabled')
+        if not enabled_templates:
+            disabled_names = templates_to_sync.mapped('name')
+            raise UserError(_("WooCommerce sync is not enabled for the parent template(s) of the selected variant(s): %s") % ', '.join(disabled_names))
+
+        _logger.info(f"Manual sync trigger from variant form for template(s): {enabled_templates.mapped('name')}. Using template's batch sync method.")
+        # Call the batch sync action method on the parent template(s)
+        return enabled_templates.sync_to_woocommerce_in_batches(batch_size=30) # Use a reasonable default batch size

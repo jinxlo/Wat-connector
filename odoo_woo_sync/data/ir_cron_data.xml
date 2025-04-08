@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Removed noupdate="1" from data tag for testing -->
     <data>
+
+        <!-- Main WooCommerce Sync Cron -->
         <record id="ir_cron_woocommerce_sync" model="ir.cron">
             <field name="name">WooCommerce: Sync Products</field>
             <field name="model_id" ref="product.model_product_template"/>
@@ -15,5 +16,21 @@
             <field name="active" eval="False"/>
             <field name="priority">5</field>
         </record>
+
+        <!-- 🆕 GPT Enrichment Preview Cron (No Woo Push) -->
+        <record id="ir_cron_gpt_enrichment_preview" model="ir.cron">
+            <field name="name">WooCommerce: GPT Product Enrichment Preview</field>
+            <field name="model_id" ref="product.model_product_template"/>
+            <field name="state">code</field>
+            <field name="code">model._cron_gpt_enrichment_preview()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">6</field>
+            <field name="interval_type">hours</field>
+            <field name="numbercall">-1</field>
+            <field name="doall">False</field>
+            <field name="active" eval="False"/> <!-- Set to True if you want it enabled on install -->
+            <field name="priority">10</field>
+        </record>
+
     </data>
 </odoo>

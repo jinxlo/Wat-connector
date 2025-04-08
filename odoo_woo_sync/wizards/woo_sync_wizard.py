@@ -6,7 +6,8 @@ from odoo.exceptions import UserError
 
 _logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 5  # Max items per batch, tweakable
+# <<< MODIFICATION: Changed batch size here >>>
+BATCH_SIZE = 30 # Max items per batch, tweakable
 
 class WooSyncWizard(models.TransientModel):
     _name = 'woo.sync.wizard'
@@ -79,6 +80,7 @@ class WooSyncWizard(models.TransientModel):
             }
         }
 
+    # This method uses the BATCH_SIZE constant defined above
     def _sync_in_batches(self, products):
         total = len(products)
         all_synced = self.env['product.template']
@@ -87,11 +89,29 @@ class WooSyncWizard(models.TransientModel):
             batch = products[i:i + BATCH_SIZE]
             _logger.info(f"Syncing batch {i // BATCH_SIZE + 1} of {(total + BATCH_SIZE - 1) // BATCH_SIZE}")
             try:
+                # Note: This wizard's batching calls the non-batching sync method
+                # on the small 'batch' recordset.
                 batch.sync_to_woocommerce()
             except Exception as e:
                 _logger.warning(f"Batch {i // BATCH_SIZE + 1} failed: {e}")
-            all_synced |= batch
-            time.sleep(1)
+                # Commit successful items within the batch even if one fails?
+                # Or rollback the whole batch on error? Current behavior depends
+                # on how sync_to_woocommerce handles errors and transactions.
+                # Let's assume sync_to_woocommerce handles its own errors/commits per item.
+                pass # Continue to next batch even if current one had issues
+            finally:
+                # Add processed batch to the list regardless of individual errors
+                # (errors should be marked on the products themselves)
+                all_synced |= batch
+                # Commit after each batch attempt to save progress/errors incrementally
+                # Be cautious with committing frequently if transactions need to be atomic
+                try:
+                    self.env.cr.commit()
+                    _logger.info(f"Committed progress after batch {i // BATCH_SIZE + 1}.")
+                except Exception as commit_e:
+                    _logger.error(f"Failed to commit after batch {i // BATCH_SIZE + 1}: {commit_e}")
+                    self.env.cr.rollback() # Rollback if commit fails
+                time.sleep(1) # Keep the delay between batches
 
         return all_synced
 
@@ -123,10 +143,12 @@ class WooSyncWizard(models.TransientModel):
             raise UserError(_("Select products or check 'Use All Enabled'."))
 
         try:
+            # Call the wizard's internal batching method
             all_synced = self._sync_in_batches(products_to_sync)
             return self._process_sync_results(all_synced, initial_selection_count, disabled_selected_count)
         except Exception as e:
             _logger.error(f"Wizard Sync Error: {e}", exc_info=True)
+            self.env.cr.rollback() # Rollback on outer exception
             raise UserError(_("Sync Error: %s") % e)
 
     def action_confirm_sync_with_images(self):
@@ -158,10 +180,12 @@ class WooSyncWizard(models.TransientModel):
             raise UserError(_("Select products or check 'Use All Enabled'."))
 
         try:
+            # Call the wizard's internal batching method
             all_synced = self._sync_in_batches(products_to_sync)
             return self._process_sync_results(all_synced, initial_selection_count, skipped_count)
         except Exception as e:
             _logger.error(f"Wizard Sync (images) Error: {e}", exc_info=True)
+            self.env.cr.rollback() # Rollback on outer exception
             raise UserError(_("Sync Error: %s") % e)
 
     def button_enable_sync_for_products_with_images(self):
@@ -176,10 +200,12 @@ class WooSyncWizard(models.TransientModel):
         else:
             try:
                 products_with_images.write({'woo_sync_enabled': True})
+                self.env.cr.commit() # Commit the change immediately
                 message = _("Successfully enabled 'Sync with WooCommerce' for %d products that have images.") % count
                 _logger.info(message)
             except Exception as e:
                 _logger.error(f"Failed to enable sync for products with images: {e}", exc_info=True)
+                self.env.cr.rollback() # Rollback if write or commit fails
                 raise UserError(_("An error occurred while enabling sync: %s") % e)
 
         return {
